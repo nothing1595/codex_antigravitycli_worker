@@ -71,6 +71,15 @@ function resolveAgyExe() {
 
 const AGY_EXE = resolveAgyExe();
 
+// Claude Thinking models encode their reasoning mode in the model slug and
+// reject the generic CLI `--effort` flag. Gemini/GPT models continue to use
+// the flag because their available effort levels are explicit CLI options.
+function modelSupportsEffortFlag(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return !normalized.startsWith("claude-") && !normalized.startsWith("claude_");
+}
+
 function getAgyEnv() {
   const env = { ...process.env };
   env.USERPROFILE = HOST_USER_PROFILE;
@@ -994,7 +1003,7 @@ async function acquireSpawnSlot() {
   };
 }
 
-function spawnAgyProcess(session) {
+function buildAgyArgs(session) {
   const args = [
     "--input-format", "stream-json",
     "--output-format", "stream-json",
@@ -1009,7 +1018,7 @@ function spawnAgyProcess(session) {
     args.push("--model", session.model);
   }
 
-  if (session.effort) {
+  if (session.effort && modelSupportsEffortFlag(session.model)) {
     args.push("--effort", session.effort);
   }
 
@@ -1020,6 +1029,12 @@ function spawnAgyProcess(session) {
   if (session.conversationId) {
     args.push("--conversation", session.conversationId);
   }
+
+  return args;
+}
+
+function spawnAgyProcess(session) {
+  const args = buildAgyArgs(session);
 
   logEvent(`spawning agy in ${session.workspace} (model=${session.model}, effort=${session.effort || "default"}, resume=${session.conversationId || "none"})`);
 
@@ -1659,6 +1674,8 @@ module.exports = {
   MODELS_CACHE_FILE,
   MODELS_CACHE_DIR,
   getAgyEnv,
+  modelSupportsEffortFlag,
+  buildAgyArgs,
   getBaseFamilyName,
   getEffortScore,
   makeWorkerName,

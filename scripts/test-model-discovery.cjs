@@ -299,9 +299,45 @@ async function runTests() {
     console.log("✓ DEFAULT_TIMEOUT_MINUTES is defined and defaults to 240 minutes");
 
     // -------------------------------------------------------------------------
-    // Test 9: Non-Empty Partial / Malformed Result Protection (Quality Gates)
+    // Test 9: Model-specific --effort compatibility
     // -------------------------------------------------------------------------
-    console.log("\n[Test 9] Quality gates: Non-empty partial / malformed result protection...");
+    console.log("\n[Test 9] Model-specific --effort compatibility...");
+    const effortCases = [
+      { alias: "agy_gemini3.8flash_worker", expected: true },
+      { alias: "agy_gemini3.7flash_worker", expected: true },
+      { alias: "agy_gemini3.6flash_worker", expected: true },
+      { alias: "agy_gemini3.1pro_worker", expected: true },
+      { alias: "agy_claudesonnet4.6_worker", expected: false },
+      { alias: "agy_claudeopus4.6_worker", expected: false },
+      { alias: "agy_gptoss120b_worker", expected: true },
+    ];
+    for (const testCase of effortCases) {
+      const resolved = await broker.resolveModelSelection(testCase.alias);
+      assert.strictEqual(
+        broker.modelSupportsEffortFlag(resolved.model),
+        testCase.expected,
+        `${testCase.alias} effort policy mismatch`
+      );
+      const args = broker.buildAgyArgs({
+        model: resolved.model,
+        effort: resolved.effort,
+        permissionMode: "yolo",
+        agent: "compatibility-test",
+        conversationId: null,
+      });
+      const effortIndex = args.indexOf("--effort");
+      assert.strictEqual(
+        effortIndex >= 0,
+        testCase.expected,
+        `${testCase.alias} must ${testCase.expected ? "include" : "omit"} --effort`
+      );
+    }
+    console.log("✓ Gemini/GPT-OSS retain --effort; Claude Sonnet/Opus omit incompatible --effort");
+
+    // -------------------------------------------------------------------------
+    // Test 10: Non-Empty Partial / Malformed Result Protection (Quality Gates)
+    // -------------------------------------------------------------------------
+    console.log("\n[Test 10] Quality gates: Non-empty partial / malformed result protection...");
 
     // 1. Raw model validation: reject error strings, invalid slugs, duplicate floods
     const malformedRaw = [
@@ -412,7 +448,7 @@ async function runTests() {
     console.log("✓ Quality gates verified: partial/corrupt outputs rejected, existing 7-model cache fully protected, and valid updates/growth permitted");
 
     console.log("\n=======================================================");
-    console.log("ALL MODEL DISCOVERY & CACHING UNIT TESTS PASSED (9/9)");
+    console.log("ALL MODEL DISCOVERY & CACHING UNIT TESTS PASSED (10/10)");
     console.log("=======================================================");
   } finally {
     try {
