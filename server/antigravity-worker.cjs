@@ -101,6 +101,8 @@ async function callBroker(method, params) {
     }
   }
   throw new Error(`antigravity-broker unreachable on 127.0.0.1:${BROKER_PORT}: ${lastError?.message || "unknown error"}`);
+}
+
 const tools = [
   {
     name: "list_models",

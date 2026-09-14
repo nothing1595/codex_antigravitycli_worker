@@ -261,6 +261,30 @@ function killProcessTree(pid) {
   });
 }
 
+async function terminateSessionProcess(session, reason) {
+  if (!session || !session.process || session.processExited) return;
+  const child = session.process;
+  const pid = child.pid;
+  logEvent(`terminating session ${session.sessionId} process (pid=${pid}) due to: ${reason}`);
+
+  session.processExited = true;
+
+  try { child.stdin?.end(); } catch { /* ignore */ }
+  try { child.kill("SIGINT"); } catch { /* ignore */ }
+
+  const start = Date.now();
+  while (Date.now() - start < 2500) {
+    if (session.processExited && !session.process) break;
+    await sleep(200);
+  }
+
+  if (pid) {
+    await killProcessTree(pid);
+  }
+
+  session.process = null;
+}
+
 // ---------------------------------------------------------------------------
 // Session & Subprocess Lifecycle
 
@@ -368,8 +392,9 @@ function spawnAgyProcess(session) {
         activeJob.status = "cancelled";
       } else {
         activeJob.status = code === 0 ? "completed" : "failed";
-        if (code !== 0 && signal) {
-          activeJob.stderr = safeTail(`${activeJob.stderr}\nProcess terminated by ${signal}`);
+        if (code !== 0) {
+          const detail = signal ? `by signal ${signal}` : `with exit code ${code}`;
+          activeJob.stderr = safeTail(`${activeJob.stderr}\nAntigravity CLI process terminated unexpectedly (${detail}). Session conversation_id '${session.conversationId || "unknown"}' is preserved for lazy recovery via continue_task.`);
         }
       }
       activeJob.exitCode = code;
@@ -497,6 +522,7 @@ async function startJob(args, isContinue = false) {
     throw new Error("task is required");
   }
 
+  const timeoutMinutes = Number(args.timeout_minutes) || session.timeoutMinutes || 30;
   const jobId = `ajob_${randomUUID()}`;
   const job = {
     jobId,
@@ -505,6 +531,7 @@ async function startJob(args, isContinue = false) {
     workspace: session.workspace,
     model: session.model,
     prompt: task,
+    timeoutMinutes,
     status: "queued",
     startedAt: new Date().toISOString(),
     completedAt: null,
@@ -522,7 +549,7 @@ async function startJob(args, isContinue = false) {
 
   jobs.set(jobId, job);
   session.activeJobId = jobId;
-  logEvent(`job ${jobId} created for session ${session.sessionId} (${isContinue ? "continue" : "new"})`);
+  logEvent(`job ${jobId} created for session ${session.sessionId} (${isContinue ? "continue" : "new"}, timeout=${timeoutMinutes}m)`);
 
   void executeJob(job, session);
   return publicJob(job, false);
@@ -568,12 +595,13 @@ async function executeJob(job, session) {
     session.process.stdin.write(`${JSON.stringify(userEvent)}\n`);
     logEvent(`job ${job.jobId} sent turn prompt to agy stdin`);
 
-    const hardDeadline = Date.now() + TASK_HARD_TIMEOUT_MS;
+    const timeoutMs = (job.timeoutMinutes || 30) * 60_000;
+    const hardDeadline = Date.now() + Math.min(timeoutMs, TASK_HARD_TIMEOUT_MS);
     while (!TERMINAL_STATUSES.has(job.status)) {
       await sleep(1000);
 
       if (Date.now() > hardDeadline) {
-        throw new Error(`Task exceeded maximum hard timeout (${Math.round(TASK_HARD_TIMEOUT_MS / 60_000)}m)`);
+        throw new Error(`Task exceeded timeout limit (${job.timeoutMinutes || 30}m)`);
       }
 
       const silenceMs = Date.now() - job.lastActivityMs;
@@ -587,6 +615,8 @@ async function executeJob(job, session) {
       job.stderr = safeTail(`${job.stderr}\n${error.stack || error.message}`);
     }
     settleJob(job);
+    // Proactively kill the agy process so it cannot continue mutating workspace in background
+    await terminateSessionProcess(session, `job execution aborted: ${error.message}`);
   }
 }
 
@@ -607,22 +637,8 @@ async function cancelJob(jobId) {
   job.cancelRequested = true;
 
   const session = sessions.get(job.sessionId);
-  if (session && session.process && !session.processExited) {
-    const pid = session.process.pid;
-    logEvent(`cancelling job ${jobId}, attempting graceful termination of pid ${pid}`);
-
-    try { session.process.stdin.end(); } catch { /* ignore */ }
-    try { session.process.kill("SIGINT"); } catch { /* ignore */ }
-
-    const startWait = Date.now();
-    while (!session.processExited && Date.now() - startWait < 3000) {
-      await sleep(200);
-    }
-
-    if (!session.processExited && pid) {
-      logEvent(`pid ${pid} did not exit gracefully, killing process tree via taskkill`);
-      await killProcessTree(pid);
-    }
+  if (session) {
+    await terminateSessionProcess(session, `job ${jobId} cancelled`);
   }
 
   job.status = "cancelled";

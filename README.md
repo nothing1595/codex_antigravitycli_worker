@@ -70,10 +70,12 @@ When assigned in Codex:
    Does not require Chrome DevTools Protocol or physical window UI clicking. Tasks run truly headless in the background.
 3. **Native Real-time Telemetry (`stream-json`)**:
    `init`, `step_update`, and `result` events provide immediate `conversation_id`, active tool calls, incremental tokens, and streaming text deltas without polling an external SQLite database.
-4. **Native Permission Bypass**:
-   `--dangerously-skip-permissions` enables fully unattended execution (the `yolo` semantic).
-5. **Native Fallback Continuity**:
-   If a persistent process unexpectedly terminates, the broker automatically reconnects via `agy --conversation <id>`.
+4. **Native Permission Bypass & Autonomous Mode**:
+   `--dangerously-skip-permissions` combined with `--mode accept-edits` and autonomous prompt framing enables fully unattended execution (the `yolo` semantic) without interactive plan/permission pauses.
+5. **Session-Level Lazy Recovery (Fail-Fast & Auto-Resume)**:
+   If the underlying `agy` process terminates or crashes during a turn, the current task fails safely without blind destructive re-execution. The `conversation_id` is preserved in the session, and the next `continue_task` call automatically revives the session via `agy --conversation <id>`.
+6. **Active Process Tree Termination**:
+   When a task exceeds its configured `timeout_minutes`, experiences extended stall silence, or is cancelled, the broker actively and recursively kills the entire underlying subprocess tree (`taskkill /T /F`), ensuring orphan CLI processes cannot continue mutating the workspace in the background.
 
 ---
 
