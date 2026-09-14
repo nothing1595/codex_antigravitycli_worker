@@ -298,6 +298,18 @@ async function runTests() {
     assert.strictEqual(broker.DEFAULT_TIMEOUT_MINUTES, 240, "Default task timeout must be 240 minutes");
     console.log("✓ DEFAULT_TIMEOUT_MINUTES is defined and defaults to 240 minutes");
 
+    const defaultTimeoutArgs = broker.buildAgyArgs({
+      model: "gemini-3.8-flash-high",
+      effort: "high",
+      permissionMode: "yolo",
+      timeoutMinutes: undefined,
+      agent: "timeout-test",
+      conversationId: null,
+    });
+    const defaultPrintTimeoutIndex = defaultTimeoutArgs.indexOf("--print-timeout");
+    assert.strictEqual(defaultTimeoutArgs[defaultPrintTimeoutIndex + 1], "240m", "CLI print timeout must default to 240m");
+    console.log("✓ CLI print timeout defaults to 240 minutes instead of agy's 5-minute default");
+
     // -------------------------------------------------------------------------
     // Test 9: Model-specific --effort compatibility
     // -------------------------------------------------------------------------
@@ -322,9 +334,12 @@ async function runTests() {
         model: resolved.model,
         effort: resolved.effort,
         permissionMode: "yolo",
+        timeoutMinutes: 180,
         agent: "compatibility-test",
         conversationId: null,
       });
+      const printTimeoutIndex = args.indexOf("--print-timeout");
+      assert.strictEqual(args[printTimeoutIndex + 1], "180m", `${testCase.alias} print timeout must follow session timeout`);
       const effortIndex = args.indexOf("--effort");
       assert.strictEqual(
         effortIndex >= 0,

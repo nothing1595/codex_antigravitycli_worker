@@ -80,6 +80,14 @@ function modelSupportsEffortFlag(model) {
   return !normalized.startsWith("claude-") && !normalized.startsWith("claude_");
 }
 
+function getCliPrintTimeoutMinutes(session) {
+  const timeoutMinutes = Number(session?.timeoutMinutes);
+  if (Number.isFinite(timeoutMinutes) && timeoutMinutes > 0) {
+    return Math.max(1, Math.ceil(timeoutMinutes));
+  }
+  return Math.max(1, Math.ceil(DEFAULT_TIMEOUT_MINUTES));
+}
+
 function getAgyEnv() {
   const env = { ...process.env };
   env.USERPROFILE = HOST_USER_PROFILE;
@@ -1007,6 +1015,9 @@ function buildAgyArgs(session) {
   const args = [
     "--input-format", "stream-json",
     "--output-format", "stream-json",
+    // agy applies a separate per-turn print timeout (default 5m), even for
+    // stream-json sessions. Keep it aligned with the broker session timeout.
+    "--print-timeout", `${getCliPrintTimeoutMinutes(session)}m`,
   ];
 
   if (session.permissionMode === "yolo") {
@@ -1036,7 +1047,7 @@ function buildAgyArgs(session) {
 function spawnAgyProcess(session) {
   const args = buildAgyArgs(session);
 
-  logEvent(`spawning agy in ${session.workspace} (model=${session.model}, effort=${session.effort || "default"}, resume=${session.conversationId || "none"})`);
+  logEvent(`spawning agy in ${session.workspace} (model=${session.model}, effort=${session.effort || "default"}, print_timeout=${getCliPrintTimeoutMinutes(session)}m, resume=${session.conversationId || "none"})`);
 
   const child = spawn(AGY_EXE, args, {
     cwd: session.workspace,
@@ -1675,6 +1686,7 @@ module.exports = {
   MODELS_CACHE_DIR,
   getAgyEnv,
   modelSupportsEffortFlag,
+  getCliPrintTimeoutMinutes,
   buildAgyArgs,
   getBaseFamilyName,
   getEffortScore,
