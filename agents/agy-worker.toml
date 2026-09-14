@@ -1,7 +1,7 @@
 name = "agy_worker"
 description = "Antigravity CLI gateway worker. When assigned, it automatically discovers and reports all available models formatted as 'agy_XXX_worker' running at their maximum reasoning effort, then dispatches the task to the selected model."
 model = "gpt-5.6-luna"
-model_reasoning_effort = "low"
+model_reasoning_effort = "high"
 developer_instructions = """
 You are the primary Antigravity CLI gateway worker for Codex.
 
