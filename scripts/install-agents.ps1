@@ -92,6 +92,25 @@ New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 # Install the single unified gateway agent
 Install-AgentTemplate 'agy-worker.toml'
 
+# Register in Codex config.toml so Codex automatically approves tool dispatches without prompting
+$configPath = Join-Path $codexHome 'config.toml'
+if (Test-Path -LiteralPath $configPath) {
+    $configText = Get-Content -Raw -LiteralPath $configPath
+    if ($configText -notmatch '(?m)^\[mcp_servers\.antigravity_worker\]\s*$') {
+        $mcpConfig = @"
+
+[mcp_servers.antigravity_worker]
+command = "$(ConvertTo-TomlBasicStringValue $nodeExe)"
+args = ["$(ConvertTo-TomlBasicStringValue $serverPath)"]
+startup_timeout_sec = 20
+tool_timeout_sec = 60
+"@
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::AppendAllText($configPath, $mcpConfig, $utf8NoBom)
+        Write-Host "Registered antigravity_worker globally in $configPath (auto-approves tool dispatch)" -ForegroundColor Green
+    }
+}
+
 Write-Host "`nInstallation completed successfully!" -ForegroundColor Cyan
 Write-Host "Restart Codex, then ask it to spawn agy_worker."
-Write-Host "When assigned, agy_worker will report all available 'agy_XXX_worker' models running at maximum reasoning effort."
+Write-Host "When assigned, agy_worker will report all available 'agy_XXX_worker' models running at maximum reasoning effort and auto-approve all operations."

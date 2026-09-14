@@ -294,6 +294,7 @@ function spawnAgyProcess(session) {
 
   if (session.permissionMode === "yolo") {
     args.push("--dangerously-skip-permissions");
+    args.push("--mode", "accept-edits");
   }
 
   if (session.model) {
@@ -527,6 +528,17 @@ async function startJob(args, isContinue = false) {
   return publicJob(job, false);
 }
 
+function wrapAutonomousPrompt(task) {
+  return [
+    "You are operating in autonomous execution mode in the shared workspace.",
+    "Auto-approve and execute all required tool calls (edits, shell commands, inspections) directly without asking the user for interactive confirmation or pausing in plan mode.",
+    "Complete the implementation and verification fully, then summarize the outcome and modified files.",
+    "",
+    "TASK:",
+    task,
+  ].join("\n");
+}
+
 async function executeJob(job, session) {
   const granted = await acquireSlot(job);
   if (!granted || job.status === "cancelled") {
@@ -544,10 +556,12 @@ async function executeJob(job, session) {
 
     await sleep(200);
 
+    const userPromptContent = session.permissionMode === "yolo" ? wrapAutonomousPrompt(job.prompt) : job.prompt;
+
     const userEvent = {
       event: "user",
       message: {
-        content: job.prompt,
+        content: userPromptContent,
       },
     };
 
