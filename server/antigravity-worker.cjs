@@ -159,8 +159,8 @@ const tools = [
         },
         timeout_minutes: {
           type: "number",
-          description: "Optional timeout in minutes (default 30).",
-          default: 30,
+          description: "Optional task timeout in minutes (default: 240 min / 4 hours, bounded by AGY_TASK_TIMEOUT_MS). Pass lower value to restrict specific short-lived tasks.",
+          default: 240,
         },
       },
       required: ["workspace", "task"],
@@ -180,6 +180,10 @@ const tools = [
         task: {
           type: "string",
           description: "Follow-up instruction for the ongoing session.",
+        },
+        timeout_minutes: {
+          type: "number",
+          description: "Optional turn timeout override in minutes for this continuation (default: session timeout, up to 4 hours).",
         },
       },
       required: ["session_id", "task"],

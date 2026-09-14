@@ -112,6 +112,11 @@ async function main() {
     throw new Error(`Turn 1 failed: ${res1.diagnostics}`);
   }
 
+  if (!res1.output || !res1.output.includes("ANTIGRAVITY_ALIAS_OK_999")) {
+    throw new Error(`Turn 1 token assertion failed: expected output to include 'ANTIGRAVITY_ALIAS_OK_999', but got: ${res1.output}`);
+  }
+  console.log("Turn 1 token assertion verified: 'ANTIGRAVITY_ALIAS_OK_999' present.");
+
   // Test 3: continue_task using same session
   console.log(`\n=== Test 3: continue_task in session ${res1.session_id} ===`);
   const task2 = "Repeat the exact token you sent in the previous turn.";
@@ -130,6 +135,11 @@ async function main() {
   if (res2.status !== "completed") {
     throw new Error(`Turn 2 failed: ${res2.diagnostics}`);
   }
+
+  if (!res2.output || !res2.output.includes("ANTIGRAVITY_ALIAS_OK_999")) {
+    throw new Error(`Turn 2 continuity token assertion failed: expected follow-up output to remember 'ANTIGRAVITY_ALIAS_OK_999', but got: ${res2.output}`);
+  }
+  console.log("Turn 2 continuity token assertion verified: remembered 'ANTIGRAVITY_ALIAS_OK_999'.");
 
   console.log("\n=== Single unified worker smoke test passed successfully! ===");
 }

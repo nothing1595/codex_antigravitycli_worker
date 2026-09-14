@@ -37,6 +37,7 @@ Your workflow:
      - task: complete delegated user task
      - model: the selected model name (you can pass 'agy_gemini3.8flash_worker' or raw slug directly; the bridge automatically enforces the highest available reasoning effort for that model)
      - permission_mode: "yolo"
+     - timeout_minutes: optional (defaults to 240 min / 4 hours; only specify if the user explicitly asks for a shorter timeout)
    - Remember the returned `session_id` and `conversation_id`.
 
 3. MONITORING PROGRESS (Long-Polling):

@@ -45,6 +45,10 @@ Instead of proxying or pretending Gemini is a native Codex model, this bridge wr
 
 To keep the Codex custom agents list clean and clutter-free, only **one** agent is registered: **`agy_worker`**.
 
+> [!IMPORTANT]
+> **Model Aliases vs. Real Codex Custom Agent**:
+> `agy_worker` is the **only true Codex Custom Agent** (`.codex/agents/agy-worker.toml`). Identifiers such as `agy_gemini3.8flash_worker`, `agy_gemini3.1pro_worker`, and `agy_claudesonnet4.6_worker` are **dynamic model-selection aliases** recognized by `run_task(model="...")`. Codex Main delegates to `agy_worker`, which discovers models via `list_models()`, presents the aliases to the user, and forwards the chosen alias to the bridge.
+
 When assigned in Codex:
 1. **Model Discovery & Feedback**:
    If the user has not specified a model or asks what models are available, `agy_worker` invokes `list_models` and presents the available model families formatted as `agy_XXX_worker`:
@@ -74,16 +78,29 @@ When assigned in Codex:
    `--dangerously-skip-permissions` combined with `--mode accept-edits` and autonomous prompt framing enables fully unattended execution (the `yolo` semantic) without interactive plan/permission pauses.
 5. **Session-Level Lazy Recovery (Fail-Fast & Auto-Resume)**:
    If the underlying `agy` process terminates or crashes during a turn, the current task fails safely without blind destructive re-execution. The `conversation_id` is preserved in the session, and the next `continue_task` call automatically revives the session via `agy --conversation <id>`.
-6. **Active Process Tree Termination**:
-   When a task exceeds its configured `timeout_minutes`, experiences extended stall silence, or is cancelled, the broker actively and recursively kills the entire underlying subprocess tree (`taskkill /T /F`), ensuring orphan CLI processes cannot continue mutating the workspace in the background.
+6. **Active Process Tree Termination & Clean Shutdown**:
+   When a task exceeds its configured `timeout_minutes`, experiences extended stall silence, or is cancelled, the broker actively and recursively kills the entire underlying subprocess tree (`taskkill /T /F`). Furthermore, when the broker shuts down on idle timeout or termination signals, it asynchronously awaits process tree termination across all persistent sessions before closing server sockets.
+7. **True Long-Running Task Support (Default 4-Hour Deadline)**:
+   Tasks default to 240 minutes (4 hours, bounded by `AGY_TASK_TIMEOUT_MS`). The bridge never prematurely aborts healthy long-running refactoring or multi-module coding tasks at 30 minutes. Explicit `timeout_minutes` can still be specified to bound short turns.
+8. **Stream-JSON Result Integrity**:
+   A turn only succeeds when `stream-json` delivers a `result` event with `status === "SUCCESS"`. If an `agy` CLI process closes unexpectedly (even with exit code 0) prior to emitting a `result` event, the turn is immediately and accurately marked as `failed`.
+
+---
+
+## Architectural Boundary: Agent MCP vs. Global MCP Registration
+
+- **Agent-Level Registration (`agents/agy-worker.toml`)**:
+  This is the primary recommended pattern: Codex Main delegates tasks to `agy_worker`, which possesses specialized instructions for model discovery, feedback loops, highest reasoning enforcement, and long-polling progress monitoring.
+- **Global Registration (`config.toml`)**:
+  Registered globally so that Codex Main can also directly inspect or invoke `antigravity_worker` tools if needed. This does not interfere with the custom agent flow and gives flexibility for direct workflows.
 
 ---
 
 ## MCP Tools Reference
 
 - **`list_models()`**: Queries `agy models`, aggregates models into families, and returns the list of `agy_XXX_worker` identifiers along with their maximum reasoning effort configurations.
-- **`run_task(workspace, task, model?, effort?, agent?, permission_mode?, timeout_minutes?)`**: Starts a persistent Antigravity session in the workspace. Supports model aliases (e.g. `agy_gemini3.8flash_worker`, `agy_gemini3.1pro_worker`) and defaults to maximum reasoning effort.
-- **`continue_task(session_id, task)`**: Sends a follow-up turn prompt directly to the running session's stdin.
+- **`run_task(workspace, task, model?, effort?, agent?, permission_mode?, timeout_minutes?)`**: Starts a persistent Antigravity session in the workspace. Supports model aliases (e.g. `agy_gemini3.8flash_worker`, `agy_gemini3.1pro_worker`), defaults to maximum reasoning effort, and defaults to a 240-minute (4-hour) timeout for deep tasks.
+- **`continue_task(session_id, task, timeout_minutes?)`**: Sends a follow-up turn prompt directly to the running session's stdin.
 - **`get_status(job_id, wait_ms?)`**: Long-polling status and live progress telemetry.
 - **`cancel_task(job_id)`**: Gracefully stops the active turn and halts the subprocess tree.
 

@@ -20,6 +20,7 @@ const IDLE_EXIT_MS = Number(process.env.AGY_BROKER_IDLE_MS || 10 * 60_000);
 const JOB_TTL_MS = 60 * 60_000;
 const TASK_IDLE_TIMEOUT_MS = Number(process.env.AGY_TASK_IDLE_TIMEOUT_MS || 10 * 60_000);
 const TASK_HARD_TIMEOUT_MS = Number(process.env.AGY_TASK_TIMEOUT_MS || 4 * 60 * 60_000);
+const DEFAULT_TIMEOUT_MINUTES = Math.round(TASK_HARD_TIMEOUT_MS / 60_000);
 const MAX_OUTPUT_CHARS = 120_000;
 const MODELS_CACHE_TTL_MS = 5 * 60_000;
 
@@ -332,7 +333,7 @@ async function createSession({ workspace, model: rawModel, effort: rawEffort, ag
     effort: rawEffort || resolved.effort,
     agent: agent || null,
     permissionMode: permissionMode === "safe" ? "safe" : "yolo",
-    timeoutMinutes: Number(timeoutMinutes) || 30,
+    timeoutMinutes: Number(timeoutMinutes) || DEFAULT_TIMEOUT_MINUTES,
     process: null,
     processExited: false,
     activeJobId: null,
@@ -425,11 +426,13 @@ function spawnAgyProcess(session) {
       if (activeJob.status === "cancelling") {
         activeJob.status = "cancelled";
       } else {
-        activeJob.status = code === 0 ? "completed" : "failed";
-        if (code !== 0) {
-          const detail = signal ? `by signal ${signal}` : `with exit code ${code}`;
-          activeJob.stderr = safeTail(`${activeJob.stderr}\nAntigravity CLI process terminated unexpectedly (${detail}). Session conversation_id '${session.conversationId || "unknown"}' is preserved for lazy recovery via continue_task.`);
-        }
+        activeJob.status = "failed";
+        const detail = signal ? `by signal ${signal}` : `with exit code ${code}`;
+        const reason = code === 0
+          ? `Antigravity CLI process exited cleanly (${detail}) before providing a stream-json 'result' event. Job marked as failed.`
+          : `Antigravity CLI process terminated unexpectedly (${detail}).`;
+        activeJob.stderr = safeTail(`${activeJob.stderr}\n${reason} Session conversation_id '${session.conversationId || "unknown"}' is preserved for lazy recovery via continue_task.`);
+        activeJob.diagnostics = safeTail(`${activeJob.diagnostics || ""}\n${reason}`);
       }
       activeJob.exitCode = code;
       settleJob(activeJob);
@@ -556,7 +559,7 @@ async function startJob(args, isContinue = false) {
     throw new Error("task is required");
   }
 
-  const timeoutMinutes = Number(args.timeout_minutes) || session.timeoutMinutes || 30;
+  const timeoutMinutes = Number(args.timeout_minutes) || session.timeoutMinutes || DEFAULT_TIMEOUT_MINUTES;
   const jobId = `ajob_${randomUUID()}`;
   const job = {
     jobId,
@@ -629,13 +632,13 @@ async function executeJob(job, session) {
     session.process.stdin.write(`${JSON.stringify(userEvent)}\n`);
     logEvent(`job ${job.jobId} sent turn prompt to agy stdin`);
 
-    const timeoutMs = (job.timeoutMinutes || 30) * 60_000;
+    const timeoutMs = (job.timeoutMinutes || DEFAULT_TIMEOUT_MINUTES) * 60_000;
     const hardDeadline = Date.now() + Math.min(timeoutMs, TASK_HARD_TIMEOUT_MS);
     while (!TERMINAL_STATUSES.has(job.status)) {
       await sleep(1000);
 
       if (Date.now() > hardDeadline) {
-        throw new Error(`Task exceeded timeout limit (${job.timeoutMinutes || 30}m)`);
+        throw new Error(`Task exceeded timeout limit (${job.timeoutMinutes || DEFAULT_TIMEOUT_MINUTES}m)`);
       }
 
       const silenceMs = Date.now() - job.lastActivityMs;
@@ -829,17 +832,53 @@ setInterval(() => {
     }
   }
 
+let isShuttingDown = false;
+async function shutdownBroker(reason = "idle timeout") {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  logEvent(`initiating graceful broker shutdown (${reason})...`);
+
+  try {
+    server.close();
+  } catch { /* ignore */ }
+
+  const terminations = [];
+  for (const session of sessions.values()) {
+    if (session.process && !session.processExited) {
+      terminations.push(terminateSessionProcess(session, `broker shutdown (${reason})`));
+    }
+  }
+
+  try {
+    await Promise.allSettled(terminations);
+    logEvent("all persistent agy sessions terminated cleanly");
+  } catch (err) {
+    logEvent(`error during shutdown termination: ${err?.message || err}`);
+  }
+
+  process.exit(0);
+}
+
   if (clients.size === 0 && !hasActiveJobs() && now - lastActivity > IDLE_EXIT_MS) {
-    logEvent("antigravity-broker idle timeout reached, shutting down");
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000).unref();
+    logEvent("antigravity-broker idle timeout reached, triggering graceful shutdown");
+    void shutdownBroker("idle timeout");
   }
 }, 30_000).unref();
 
+process.on("SIGINT", () => { void shutdownBroker("SIGINT"); });
+process.on("SIGTERM", () => { void shutdownBroker("SIGTERM"); });
+
 process.on("exit", () => {
   for (const session of sessions.values()) {
-    if (session.process && !session.processExited) {
-      try { killProcessTree(session.process.pid); } catch { /* ignore */ }
+    if (session.process && !session.processExited && session.process.pid) {
+      try {
+        if (process.platform === "win32") {
+          const { execFileSync } = require("node:child_process");
+          execFileSync("taskkill", ["/pid", String(session.process.pid), "/T", "/F"], { stdio: "ignore" });
+        } else {
+          process.kill(session.process.pid, "SIGKILL");
+        }
+      } catch { /* ignore */ }
     }
   }
 });

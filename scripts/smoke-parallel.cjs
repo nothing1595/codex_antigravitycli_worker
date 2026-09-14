@@ -94,8 +94,8 @@ async function runCancelTest() {
 
 async function runParallelTest() {
   console.log("\n=== Testing Parallel Execution (2 concurrent jobs) ===");
-  const t1 = "Compute 111 * 222 and reply with the number only.";
-  const t2 = "Compute 333 * 444 and reply with the number only.";
+  const t1 = "Explain in three numbered points what a singleton pattern is, and end your reply with RESULT_T1_OK.";
+  const t2 = "Explain in three numbered points what a semaphore pattern is, and end your reply with RESULT_T2_OK.";
 
   const [job1, job2] = await Promise.all([
     brokerRequest("run_task", { workspace, task: t1, model }),
@@ -125,10 +125,13 @@ async function runParallelTest() {
         brokerRequest("get_status", { job_id: job2.job_id }),
       ]);
       if (s1.status === "running" && s2.status === "running") {
+        if (!observedOverlap) {
+          console.log(">>> [CONCURRENCY VERIFIED] Concurrent running overlap observed between Job 1 and Job 2!");
+        }
         observedOverlap = true;
       }
     } catch { /* ignore */ }
-  }, 500);
+  }, 150);
 
   const [res1, res2] = await Promise.all([poll(job1.job_id), poll(job2.job_id)]);
   clearInterval(overlapInterval);
@@ -136,6 +139,10 @@ async function runParallelTest() {
   console.log("Job 1 finished with:", res1.status, `output: ${res1.output}`);
   console.log("Job 2 finished with:", res2.status, `output: ${res2.output}`);
   console.log("Observed concurrent running overlap:", observedOverlap);
+
+  if (!observedOverlap) {
+    throw new Error("Parallel test failed: no overlapping running interval observed (jobs did not execute concurrently)");
+  }
 
   if (res1.status !== "completed" || res2.status !== "completed") {
     throw new Error("One or more parallel jobs failed");
