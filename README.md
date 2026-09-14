@@ -89,7 +89,13 @@ When assigned in Codex:
 10. **Host User Security Context Bridge (`AntigravityBroker`)**:
     Codex often runs MCP wrappers under a restricted Windows sandbox user account (`codexsandboxoffline`), where Antigravity credentials and DPAPI tokens do not exist. The bridge registers and utilizes a user-level Windows Scheduled Task (`schtasks /Run /TN AntigravityBroker`) so that the broker daemon is always launched within the interactive host user session (`15869`), retaining full authenticated access to Antigravity credentials, file permissions, and desktop display.
 11. **Fast-Path Model Resolution & Non-Idempotent Protection**:
-    Known aliases (`agy_gemini3.8flash_worker`, `gemini-3.8-flash-high`, `agy_gemini3.1pro_worker`, etc.) resolve instantly in 0ms without invoking `agy models`, completely avoiding lock contention on `knowledge.lock` and `update.lock`. Concurrency deduplication (singleflight) and strict 6-second timeouts safeguard dynamic model queries, and non-idempotent dispatches (`run_task`, `continue_task`) are strictly protected against duplicate retry loops.
+    Known aliases (`agy_gemini3.8flash_worker`, `gemini-3.8-flash-high`, `agy_gemini3.1pro_worker`, etc.) resolve instantly in 0ms without invoking `agy models`, completely avoiding lock contention on `knowledge.lock` and `update.lock`. Non-idempotent dispatches (`run_task`, `continue_task`) are strictly protected against duplicate retry loops.
+12. **Reliable Dynamic Model Discovery, Singleton Concurrency & Persistent Caching**:
+    - **Singleflight Singleton Query**: At most one `agy models` process runs across the entire host at any moment, eliminating lock contention and duplicate child processes.
+    - **Finite Retry & Backoff**: Queries employ explicit per-attempt timeouts (`AGY_MODELS_TIMEOUT_MS`, default 12s), up to 2 retries with backoff (`AGY_MODELS_BACKOFF_MS`, default 800ms), and intelligent early exit on authentication or binary errors.
+    - **Persistent Host Cache**: Successfully discovered model families are persisted to `%USERPROFILE%\.antigravity-codex-bridge\models-cache.json` (with timestamps, source, and family counts). Even across broker restarts or offline periods, all discovered models remain available immediately.
+    - **Non-Destructive Stale Degradation**: If a dynamic refresh fails (due to Antigravity CLI lock contention, background updates, or timeouts), the broker preserves the last known complete model list and flags it with `stale: true` and diagnostic messages (`diagnostics`). Temporary query failures never overwrite or truncate valid cached models. Built-in defaults are used only if no cache has ever existed.
+    - **Robust Quality Gates**: Non-empty output is never blindly accepted. The broker validates raw output structure, enforces slug syntax, deduplicates entries, and detects duplicate flood anomalies. Furthermore, when an existing full cache is present, severe shrinkage (< 50% family retention) is rejected as a `partial_result`, preventing stream cut-offs or truncated CLI runs from overwriting healthy caches while allowing natural model fleet growth.
 
 ---
 
@@ -104,7 +110,10 @@ When assigned in Codex:
 
 ## MCP Tools Reference
 
-- **`list_models()`**: Queries `agy models`, aggregates models into families, and returns the list of `agy_XXX_worker` identifiers along with their maximum reasoning effort configurations.
+- **`list_models(detailed?)`**: Queries available models dynamically, aggregates models into families, and returns the list of `agy_XXX_worker` identifiers along with their maximum reasoning effort configurations.
+  - By default, returns an array of model family objects (fully backward-compatible with Codex custom agents and scripts).
+  - Each item includes `stale` (boolean), `source` (`agy_models_cli`, `file_cache`, or `built_in_defaults`), and optional `diagnostics` info.
+  - Passing `detailed=true` returns an envelope object: `{ models, count, stale, source, diagnostics, timestamp }`.
 - **`run_task(workspace, task, model?, effort?, agent?, permission_mode?, timeout_minutes?)`**: Starts a persistent Antigravity session in the workspace. Supports model aliases (e.g. `agy_gemini3.8flash_worker`, `agy_gemini3.1pro_worker`), defaults to maximum reasoning effort, and defaults to a 240-minute (4-hour) timeout for deep tasks.
 - **`continue_task(session_id, task, timeout_minutes?)`**: Sends a follow-up turn prompt directly to the running session's stdin.
 - **`get_status(job_id, wait_ms?)`**: Long-polling status and live progress telemetry.
@@ -146,12 +155,23 @@ Restart Codex, then ask it to assign **`agy_worker`**.
 | `AGY_MAX_PARALLEL_JOBS` | `2` | Maximum concurrent active turns. |
 | `AGY_BROKER_IDLE_MS` | `600000` (10m) | Broker auto-exit timeout when idle. |
 | `AGY_TASK_TIMEOUT_MS` | `14400000` (4h) | Hard deadline timeout for a single task. |
+| `AGY_DEFAULT_TIMEOUT_MINUTES` | `240` (4h) | Default per-task timeout when `timeout_minutes` is omitted or invalid. |
 | `AGY_TASK_IDLE_TIMEOUT_MS` | `600000` (10m) | Stall detection: silence timeout before failing job. |
 | `AGY_SHOW_WINDOW` | `1` | Set to `1` to pop up desktop CLI monitor window, `0` for headless. |
+| `AGY_MODELS_CACHE_FILE` | `%USERPROFILE%\.antigravity-codex-bridge\models-cache.json` | Persistent model cache file path. |
+| `AGY_MODELS_CACHE_TTL_MS` | `300000` (5m) | In-memory models cache TTL in milliseconds. |
+| `AGY_MODELS_TIMEOUT_MS` | `12000` (12s) | Per-attempt timeout for `agy models` process. |
+| `AGY_MODELS_RETRIES` | `2` | Number of retry attempts upon query failure. |
+| `AGY_MODELS_BACKOFF_MS` | `800` | Linear backoff delay multiplier in milliseconds. |
 
 ---
 
 ## Verification & Smoke Tests
+
+Run lightweight model discovery, persistent caching, singleflight, and fast-path tests:
+```powershell
+& "E:\Node.js\node.exe" scripts\test-model-discovery.cjs
+```
 
 Run dynamic model discovery, alias resolution, and multi-turn continuation test:
 ```powershell

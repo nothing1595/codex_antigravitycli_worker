@@ -70,7 +70,10 @@ function brokerRequest(method, params) {
       try {
         const message = JSON.parse(buffer.slice(0, newline));
         if (message.error) {
-          reject(new Error(message.error.message || "broker error"));
+          const error = new Error(message.error.message || "broker error");
+          error.code = "EBROKER_RPC";
+          error.requestSent = requestSent;
+          reject(error);
         } else {
           resolve(message.result);
         }
@@ -134,6 +137,11 @@ async function callBroker(method, params) {
       if (error.requestSent && NON_IDEMPOTENT_METHODS.has(method)) {
         throw new Error(`antigravity-broker request failed after dispatch (${method}): ${error.message}`);
       }
+      // A valid broker response containing an application error is not a
+      // connectivity failure and must not be reported as "broker unreachable".
+      if (error.code === "EBROKER_RPC") {
+        throw error;
+      }
       const connectFailure = ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(error.code);
       if (!connectFailure || attempt === BROKER_START_ATTEMPTS) break;
       if (attempt === 0) spawnBroker();
@@ -146,10 +154,15 @@ async function callBroker(method, params) {
 const tools = [
   {
     name: "list_models",
-    description: "List all available Antigravity models dynamically, grouped by model family, mapped to 'agy_XXX_worker' naming convention, and configured with their maximum available reasoning effort.",
+    description: "List all available Antigravity models dynamically, grouped by model family, mapped to 'agy_XXX_worker' naming convention, and configured with their maximum available reasoning effort. Supports cached model serving and diagnostics.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        detailed: {
+          type: "boolean",
+          description: "Optional: when true, returns an object containing models, stale status, source, and failure diagnostics.",
+        },
+      },
       additionalProperties: false,
     },
   },
