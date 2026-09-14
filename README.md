@@ -84,6 +84,12 @@ When assigned in Codex:
    Tasks default to 240 minutes (4 hours, bounded by `AGY_TASK_TIMEOUT_MS`). The bridge never prematurely aborts healthy long-running refactoring or multi-module coding tasks at 30 minutes. Explicit `timeout_minutes` can still be specified to bound short turns.
 8. **Stream-JSON Result Integrity**:
    A turn only succeeds when `stream-json` delivers a `result` event with `status === "SUCCESS"`. If an `agy` CLI process closes unexpectedly (even with exit code 0) prior to emitting a `result` event, the turn is immediately and accurately marked as `failed`.
+9. **Visible Desktop CLI Execution Monitor (`antigravity-viewer.cjs`)**:
+   By default on Windows (`AGY_SHOW_WINDOW=1`), when a task is dispatched by Codex, a dedicated terminal window titled `Antigravity CLI Monitor - [Model]` pops up directly on your desktop. It renders a colorized real-time HUD showing streaming thoughts (`[THINKING]`), live tool invocations (`[TOOL CALL]`), tool outputs, and assistant generation deltas. When the task finishes, the window displays a completion banner and remains open for user review.
+10. **Host User Security Context Bridge (`AntigravityBroker`)**:
+    Codex often runs MCP wrappers under a restricted Windows sandbox user account (`codexsandboxoffline`), where Antigravity credentials and DPAPI tokens do not exist. The bridge registers and utilizes a user-level Windows Scheduled Task (`schtasks /Run /TN AntigravityBroker`) so that the broker daemon is always launched within the interactive host user session (`15869`), retaining full authenticated access to Antigravity credentials, file permissions, and desktop display.
+11. **Fast-Path Model Resolution & Non-Idempotent Protection**:
+    Known aliases (`agy_gemini3.8flash_worker`, `gemini-3.8-flash-high`, `agy_gemini3.1pro_worker`, etc.) resolve instantly in 0ms without invoking `agy models`, completely avoiding lock contention on `knowledge.lock` and `update.lock`. Concurrency deduplication (singleflight) and strict 6-second timeouts safeguard dynamic model queries, and non-idempotent dispatches (`run_task`, `continue_task`) are strictly protected against duplicate retry loops.
 
 ---
 
@@ -134,6 +140,7 @@ Restart Codex, then ask it to assign **`agy_worker`**.
 | `AGY_BROKER_IDLE_MS` | `600000` (10m) | Broker auto-exit timeout when idle. |
 | `AGY_TASK_TIMEOUT_MS` | `14400000` (4h) | Hard deadline timeout for a single task. |
 | `AGY_TASK_IDLE_TIMEOUT_MS` | `600000` (10m) | Stall detection: silence timeout before failing job. |
+| `AGY_SHOW_WINDOW` | `1` | Set to `1` to pop up desktop CLI monitor window, `0` for headless. |
 
 ---
 

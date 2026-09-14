@@ -78,9 +78,91 @@ let activeSlots = 0;
 const slotWaiters = [];
 let lastActivity = Date.now();
 
-// Model Cache
-let cachedModels = null;
+// Session Event Stream Directory for Real-Time CLI Window Monitor
+const SESSIONS_LOG_DIR = path.join(os.tmpdir(), "antigravity-sessions");
+try { fs.mkdirSync(SESSIONS_LOG_DIR, { recursive: true }); } catch { /* ignore */ }
+
+// Clean up any dangling agy models processes from previous deadlocks
+function cleanupOrphanAgyModels() {
+  if (process.platform === "win32") {
+    execFile("powershell", [
+      "-NoProfile",
+      "-Command",
+      "Get-CimInstance Win32_Process -Filter \"Name = 'agy.exe'\" | Where-Object { $_.CommandLine -match 'models' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    ], () => {});
+  }
+}
+cleanupOrphanAgyModels();
+
+// Model Cache Defaults (pre-populated so list_models and resolution NEVER block empty)
+const DEFAULT_MODEL_FAMILIES = [
+  {
+    worker_name: "agy_gemini3.8flash_worker",
+    model_family: "Gemini 3.8 Flash",
+    target_model: "gemini-3.8-flash-high",
+    description: "Gemini 3.8 Flash (最高推理: High)",
+    effort: "high",
+  },
+  {
+    worker_name: "agy_gemini3.1pro_worker",
+    model_family: "Gemini 3.1 Pro",
+    target_model: "gemini-3.1-pro-high",
+    description: "Gemini 3.1 Pro (最高推理: High)",
+    effort: "high",
+  },
+  {
+    worker_name: "agy_claudesonnet4.6_worker",
+    model_family: "Claude Sonnet 4.6",
+    target_model: "claude-sonnet-4.6-thinking",
+    description: "Claude Sonnet 4.6 (最高推理: Thinking)",
+    effort: "high",
+  },
+  {
+    worker_name: "agy_claudeopus4.6_worker",
+    model_family: "Claude Opus 4.6",
+    target_model: "claude-opus-4.6-thinking",
+    description: "Claude Opus 4.6 (最高推理: Thinking)",
+    effort: "high",
+  },
+];
+let cachedModels = [...DEFAULT_MODEL_FAMILIES];
 let cachedModelsTime = 0;
+
+// Fast-path model alias dictionary to completely skip `agy models` on dispatch
+const KNOWN_MODEL_ALIASES = {
+  "gemini-3.8-flash-high": { model: "gemini-3.8-flash-high", effort: "high" },
+  "gemini-3.8-flash-medium": { model: "gemini-3.8-flash-medium", effort: "medium" },
+  "gemini-3.8-flash-low": { model: "gemini-3.8-flash-low", effort: "low" },
+  "gemini-3.8-flash": { model: "gemini-3.8-flash-high", effort: "high" },
+  "gemini3.8flash": { model: "gemini-3.8-flash-high", effort: "high" },
+  "agy_gemini3.8flash_worker": { model: "gemini-3.8-flash-high", effort: "high" },
+
+  "gemini-3.1-pro-high": { model: "gemini-3.1-pro-high", effort: "high" },
+  "gemini-3.1-pro-low": { model: "gemini-3.1-pro-low", effort: "low" },
+  "gemini-3.1-pro": { model: "gemini-3.1-pro-high", effort: "high" },
+  "gemini3.1pro": { model: "gemini-3.1-pro-high", effort: "high" },
+  "agy_gemini3.1pro_worker": { model: "gemini-3.1-pro-high", effort: "high" },
+
+  "gemini-3-flash-high": { model: "gemini-3-flash-high", effort: "high" },
+  "gemini-3-flash": { model: "gemini-3-flash-high", effort: "high" },
+  "gemini3flash": { model: "gemini-3-flash-high", effort: "high" },
+  "agy_gemini3flash_worker": { model: "gemini-3-flash-high", effort: "high" },
+
+  "claude-sonnet-4.6-thinking": { model: "claude-sonnet-4.6-thinking", effort: "high" },
+  "claude-sonnet-4.6": { model: "claude-sonnet-4.6-thinking", effort: "high" },
+  "claudesonnet4.6": { model: "claude-sonnet-4.6-thinking", effort: "high" },
+  "agy_claudesonnet4.6_worker": { model: "claude-sonnet-4.6-thinking", effort: "high" },
+
+  "claude-opus-4.6-thinking": { model: "claude-opus-4.6-thinking", effort: "high" },
+  "claude-opus-4.6": { model: "claude-opus-4.6-thinking", effort: "high" },
+  "claudeopus4.6": { model: "claude-opus-4.6-thinking", effort: "high" },
+  "agy_claudeopus4.6_worker": { model: "claude-opus-4.6-thinking", effort: "high" },
+
+  "gpt-oss-120b-medium": { model: "gpt-oss-120b-medium", effort: "medium" },
+  "gpt-oss-120b": { model: "gpt-oss-120b-medium", effort: "medium" },
+  "gptoss120b": { model: "gpt-oss-120b-medium", effort: "medium" },
+  "agy_gptoss120b_worker": { model: "gpt-oss-120b-medium", effort: "medium" },
+};
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -133,9 +215,18 @@ function makeWorkerName(baseName) {
   return `agy_${clean}_worker`;
 }
 
+let fetchModelsInFlight = null;
 function fetchRawModels() {
-  return new Promise((resolve) => {
-    execFile(AGY_EXE, ["models"], { env: getAgyEnv(), windowsHide: true }, (err, stdout) => {
+  if (fetchModelsInFlight) return fetchModelsInFlight;
+
+  fetchModelsInFlight = new Promise((resolve) => {
+    execFile(AGY_EXE, ["models"], {
+      env: getAgyEnv(),
+      windowsHide: true,
+      timeout: 6000,
+      stdio: ["ignore", "pipe", "pipe"],
+    }, (err, stdout) => {
+      fetchModelsInFlight = null;
       if (err || !stdout) {
         logEvent(`failed to query agy models: ${err?.message || "empty output"}`);
         return resolve([]);
@@ -153,11 +244,13 @@ function fetchRawModels() {
       resolve(models);
     });
   });
+
+  return fetchModelsInFlight;
 }
 
 async function getAvailableModelFamilies() {
   const now = Date.now();
-  if (cachedModels && now - cachedModelsTime < MODELS_CACHE_TTL_MS) {
+  if (cachedModels && now - cachedModelsTime < MODELS_CACHE_TTL_MS && cachedModelsTime > 0) {
     return cachedModels;
   }
 
@@ -182,20 +275,9 @@ async function getAvailableModelFamilies() {
 
   // Fallback defaults if agy models command fails
   if (familyMap.size === 0) {
-    familyMap.set("Gemini 3.8 Flash", {
-      worker_name: "agy_gemini3.8flash_worker",
-      model_family: "Gemini 3.8 Flash",
-      target_model: "gemini-3.8-flash-high",
-      description: "Gemini 3.8 Flash (最高推理: High)",
-      effort: "high",
-    });
-    familyMap.set("Gemini 3.1 Pro", {
-      worker_name: "agy_gemini3.1pro_worker",
-      model_family: "Gemini 3.1 Pro",
-      target_model: "gemini-3.1-pro-high",
-      description: "Gemini 3.1 Pro (最高推理: High)",
-      effort: "high",
-    });
+    for (const d of DEFAULT_MODEL_FAMILIES) {
+      familyMap.set(d.model_family, { ...d, score: 3 });
+    }
   }
 
   cachedModels = Array.from(familyMap.values()).map(({ score, ...rest }) => rest);
@@ -204,20 +286,30 @@ async function getAvailableModelFamilies() {
 }
 
 async function resolveModelSelection(requestedModel) {
-  const families = await getAvailableModelFamilies();
   if (!requestedModel || typeof requestedModel !== "string") {
-    const defaultFamily = families.find((f) => f.worker_name === "agy_gemini3.8flash_worker") || families[0];
-    return { model: defaultFamily.target_model, effort: defaultFamily.effort };
+    return { model: "gemini-3.8-flash-high", effort: "high" };
   }
 
   const normalized = requestedModel.trim().toLowerCase();
+
+  // FAST-PATH: Known model alias mapping (resolves in 0ms without running `agy models`)
+  if (KNOWN_MODEL_ALIASES[normalized]) {
+    return { ...KNOWN_MODEL_ALIASES[normalized] };
+  }
+
+  const stripped = normalized.replace(/^agy_/, "").replace(/_worker$/, "");
+  if (KNOWN_MODEL_ALIASES[stripped]) {
+    return { ...KNOWN_MODEL_ALIASES[stripped] };
+  }
+
+  // FALLBACK: Query dynamic models
+  const families = await getAvailableModelFamilies();
 
   // 1. Direct match with worker_name, e.g. agy_gemini3.8flash_worker
   const byWorker = families.find((f) => f.worker_name.toLowerCase() === normalized);
   if (byWorker) return { model: byWorker.target_model, effort: byWorker.effort };
 
   // 2. Match stripped format, e.g. gemini3.8flash
-  const stripped = normalized.replace(/^agy_/, "").replace(/_worker$/, "");
   const byStripped = families.find((f) => f.worker_name.toLowerCase().includes(stripped));
   if (byStripped) return { model: byStripped.target_model, effort: byStripped.effort };
 
@@ -320,11 +412,53 @@ async function terminateSessionProcess(session, reason) {
 }
 
 // ---------------------------------------------------------------------------
+// Real-Time CLI Window Monitor & Session Event Stream
+
+function writeSessionEvent(session, event) {
+  if (!session || !session.logPath) return;
+  try {
+    fs.appendFileSync(session.logPath, `${JSON.stringify(event)}\n`);
+  } catch { /* best-effort write */ }
+}
+
+const VIEWER_SCRIPT = path.join(__dirname, "..", "scripts", "antigravity-viewer.cjs");
+
+function launchSessionViewer(session) {
+  if (process.platform !== "win32") return;
+  if (process.env.AGY_SHOW_WINDOW === "0") return;
+  if (session.viewerLaunched) return;
+  session.viewerLaunched = true;
+
+  try {
+    const title = `Antigravity CLI Monitor - [${session.model || "worker"}]`;
+    const cmdArgs = [
+      "/c",
+      "start",
+      title,
+      process.execPath,
+      VIEWER_SCRIPT,
+      session.sessionId,
+      session.logPath,
+    ];
+    const viewerProc = spawn("cmd.exe", cmdArgs, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: false,
+    });
+    viewerProc.unref();
+    logEvent(`launched visible CLI monitor window for session ${session.sessionId}`);
+  } catch (err) {
+    logEvent(`failed to launch CLI monitor window: ${err?.message || err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Session & Subprocess Lifecycle
 
 async function createSession({ workspace, model: rawModel, effort: rawEffort, agent, permissionMode, timeoutMinutes }) {
   const resolved = await resolveModelSelection(rawModel);
   const sessionId = `asess_${randomUUID()}`;
+  const logPath = path.join(SESSIONS_LOG_DIR, `${sessionId}.jsonl`);
   const session = {
     sessionId,
     conversationId: null,
@@ -337,10 +471,20 @@ async function createSession({ workspace, model: rawModel, effort: rawEffort, ag
     process: null,
     processExited: false,
     activeJobId: null,
+    logPath,
+    viewerLaunched: false,
     createdAt: new Date().toISOString(),
     lastUsedAt: new Date().toISOString(),
   };
   sessions.set(sessionId, session);
+  writeSessionEvent(session, {
+    type: "meta",
+    session_id: sessionId,
+    model: session.model,
+    effort: session.effort,
+    workspace: session.workspace,
+    started_at: session.createdAt,
+  });
   return session;
 }
 
@@ -404,6 +548,7 @@ function spawnAgyProcess(session) {
       activeJob.stderr = safeTail(activeJob.stderr + chunk);
       activeJob.lastActivityMs = Date.now();
     }
+    writeSessionEvent(session, { type: "stderr", text: chunk });
   });
 
   child.on("error", (error) => {
@@ -463,6 +608,7 @@ function handleAgyEventLine(session, rawLine) {
         activeJob.conversationId = message.conversation_id;
       }
       logEvent(`session ${session.sessionId} initialized conversation ${session.conversationId}`);
+      writeSessionEvent(session, { type: "init", conversation_id: session.conversationId });
       break;
     }
 
@@ -477,6 +623,19 @@ function handleAgyEventLine(session, rawLine) {
 
       if (update.text_delta) {
         activeJob.stdout = safeTail(activeJob.stdout + update.text_delta);
+        writeSessionEvent(session, { type: "text_delta", text: update.text_delta });
+      }
+
+      if (update.thought_delta || update.reasoning_delta) {
+        writeSessionEvent(session, { type: "thought_delta", text: update.thought_delta || update.reasoning_delta });
+      }
+
+      if (update.tool_call) {
+        writeSessionEvent(session, { type: "tool_call", name: update.tool_call.name, input: update.tool_call.input });
+      }
+
+      if (update.tool_result) {
+        writeSessionEvent(session, { type: "tool_result", name: update.tool_result.name, output: update.tool_result.output });
       }
 
       if (update.usage) {
@@ -490,6 +649,7 @@ function handleAgyEventLine(session, rawLine) {
         state: update.state ?? null,
         total_tokens: update.usage?.total_tokens ?? activeJob.usage?.total_tokens ?? null,
       };
+      writeSessionEvent(session, { type: "step_progress", progress: activeJob.progress });
       break;
     }
 
@@ -529,9 +689,20 @@ function settleJob(job) {
   logEvent(`job ${job.jobId} settled with status: ${job.status}`);
 
   const session = sessions.get(job.sessionId);
-  if (session && session.activeJobId === job.jobId) {
-    session.activeJobId = null;
-    session.lastUsedAt = new Date().toISOString();
+  if (session) {
+    const duration_s = Math.max(0, Math.round((Date.now() - Date.parse(job.startedAt)) / 1000));
+    writeSessionEvent(session, {
+      type: "turn_complete",
+      job_id: job.jobId,
+      status: job.status,
+      exit_code: job.exitCode,
+      usage: job.usage,
+      duration_s,
+    });
+    if (session.activeJobId === job.jobId) {
+      session.activeJobId = null;
+      session.lastUsedAt = new Date().toISOString();
+    }
   }
 
   releaseSlot(job);
@@ -612,6 +783,13 @@ async function executeJob(job, session) {
 
   job.status = "running";
   job.lastActivityMs = Date.now();
+
+  writeSessionEvent(session, {
+    type: "turn_start",
+    job_id: job.jobId,
+    prompt: job.prompt,
+  });
+  launchSessionViewer(session);
 
   try {
     if (!session.process || session.processExited) {

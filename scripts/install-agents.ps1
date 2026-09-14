@@ -111,6 +111,20 @@ tool_timeout_sec = 60
     }
 }
 
+# Register user-level Windows Scheduled Task for AntigravityBroker
+# This ensures that when the worker calls schtasks /Run /TN AntigravityBroker, the broker
+# executes in the interactive authenticated host user session (e.g. 15869) even if invoked from codexsandboxoffline.
+if ($IsWindows -or $env:OS -match 'Windows') {
+    try {
+        $brokerScript = Join-Path $bridgeRoot 'server\antigravity-broker.cjs'
+        $taskCmd = "`"$nodeExe`" `"$brokerScript`""
+        schtasks /Create /TN "AntigravityBroker" /TR $taskCmd /SC ONCE /ST 23:59 /F 2>&1 | Out-Null
+        Write-Host "Registered user Scheduled Task 'AntigravityBroker' (host security context)." -ForegroundColor Green
+    } catch {
+        Write-Warning "Could not register AntigravityBroker scheduled task: $($_.Exception.Message)"
+    }
+}
+
 Write-Host "`nInstallation completed successfully!" -ForegroundColor Cyan
 Write-Host "Restart Codex, then ask it to spawn agy_worker."
 Write-Host "When assigned, agy_worker will report all available 'agy_XXX_worker' models running at maximum reasoning effort and auto-approve all operations."

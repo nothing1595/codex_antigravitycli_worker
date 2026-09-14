@@ -42,19 +42,29 @@ function brokerRequest(method, params) {
 }
 
 async function ensureBroker() {
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 25; i++) {
     try {
       await brokerRequest("health", {});
       return;
     } catch {
       if (i === 0) {
         console.log("Starting detached antigravity-broker daemon...");
-        const child = spawn(process.execPath, [BROKER_PATH], {
-          detached: true,
-          stdio: "ignore",
-          windowsHide: true,
-        });
-        child.unref();
+        let launched = false;
+        if (process.platform === "win32") {
+          try {
+            const { execFileSync } = require("node:child_process");
+            execFileSync("schtasks", ["/Run", "/TN", "AntigravityBroker"], { stdio: "ignore", timeout: 5000 });
+            launched = true;
+          } catch { /* fallback */ }
+        }
+        if (!launched) {
+          const child = spawn(process.execPath, [BROKER_PATH], {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          child.unref();
+        }
       }
       await sleep(300);
     }

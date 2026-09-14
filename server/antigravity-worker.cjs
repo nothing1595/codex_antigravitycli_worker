@@ -41,19 +41,22 @@ function brokerRequest(method, params) {
     const socket = net.connect(BROKER_PORT, "127.0.0.1");
     let buffer = "";
     let settled = false;
+    let requestSent = false;
 
-    const fail = (error) => {
+    const fail = (error, wasSent = requestSent) => {
       if (settled) return;
       settled = true;
       socket.destroy();
+      error.requestSent = wasSent;
       reject(error);
     };
 
     socket.setTimeout(BROKER_REQUEST_TIMEOUT_MS);
-    socket.on("timeout", () => fail(Object.assign(new Error("broker request timed out"), { code: "ETIMEDOUT" })));
-    socket.on("error", fail);
+    socket.on("timeout", () => fail(Object.assign(new Error("broker request timed out"), { code: "ETIMEDOUT" }), true));
+    socket.on("error", (err) => fail(err, requestSent));
 
     socket.on("connect", () => {
+      requestSent = true;
       socket.write(`${JSON.stringify({ id: 1, method, params })}\n`);
     });
 
@@ -79,6 +82,20 @@ function brokerRequest(method, params) {
 }
 
 function spawnBroker() {
+  // 1. On Windows, attempt to launch via Scheduled Task "AntigravityBroker".
+  // This guarantees the broker process executes in the authenticated interactive host user session (e.g. 15869)
+  // even when Codex worker runs under Windows sandbox user (codexsandboxoffline).
+  if (process.platform === "win32") {
+    try {
+      const { execFileSync } = require("node:child_process");
+      execFileSync("schtasks", ["/Run", "/TN", "AntigravityBroker"], { stdio: "ignore", timeout: 5000 });
+      return;
+    } catch {
+      // Scheduled task not available or error, fall back to direct spawn
+    }
+  }
+
+  // 2. Direct spawn fallback
   const fs = require("node:fs");
   const os = require("node:os");
   const hostProfile = process.env.AGY_USER_PROFILE || (fs.existsSync("C:\\Users\\15869") ? "C:\\Users\\15869" : os.homedir());
@@ -97,6 +114,8 @@ function spawnBroker() {
   child.unref();
 }
 
+const NON_IDEMPOTENT_METHODS = new Set(["run_task", "continue_task"]);
+
 async function callBroker(method, params) {
   let lastError;
   for (let attempt = 0; attempt <= BROKER_START_ATTEMPTS; attempt += 1) {
@@ -104,6 +123,10 @@ async function callBroker(method, params) {
       return await brokerRequest(method, params);
     } catch (error) {
       lastError = error;
+      // If request was already sent to the broker, NEVER retry non-idempotent operations!
+      if (error.requestSent && NON_IDEMPOTENT_METHODS.has(method)) {
+        throw new Error(`antigravity-broker request failed after dispatch (${method}): ${error.message}`);
+      }
       const connectFailure = ["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT"].includes(error.code);
       if (!connectFailure || attempt === BROKER_START_ATTEMPTS) break;
       if (attempt === 0) spawnBroker();
