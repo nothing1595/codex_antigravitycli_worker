@@ -23,16 +23,49 @@ const TASK_HARD_TIMEOUT_MS = Number(process.env.AGY_TASK_TIMEOUT_MS || 4 * 60 * 
 const MAX_OUTPUT_CHARS = 120_000;
 const MODELS_CACHE_TTL_MS = 5 * 60_000;
 
+function resolveHostUserProfile() {
+  if (process.env.AGY_USER_PROFILE && fs.existsSync(process.env.AGY_USER_PROFILE)) {
+    return process.env.AGY_USER_PROFILE;
+  }
+  const defaultProfile = "C:\\Users\\15869";
+  if (fs.existsSync(defaultProfile)) return defaultProfile;
+  return os.homedir();
+}
+
+const HOST_USER_PROFILE = resolveHostUserProfile();
+
 function resolveAgyExe() {
   if (process.env.AGY_EXE && fs.existsSync(process.env.AGY_EXE)) {
     return process.env.AGY_EXE;
   }
+  const localInHost = path.join(HOST_USER_PROFILE, "AppData", "Local", "agy", "bin", "agy.exe");
+  if (fs.existsSync(localInHost)) return localInHost;
   const defaultLocal = path.join(os.homedir(), "AppData", "Local", "agy", "bin", "agy.exe");
   if (fs.existsSync(defaultLocal)) return defaultLocal;
   return "agy";
 }
 
 const AGY_EXE = resolveAgyExe();
+
+function getAgyEnv() {
+  const env = { ...process.env };
+  env.USERPROFILE = HOST_USER_PROFILE;
+  env.HOME = HOST_USER_PROFILE;
+  const root = path.parse(HOST_USER_PROFILE).root || "C:\\";
+  env.HOMEDRIVE = root.replace(/[\/\\]$/, "");
+  env.HOMEPATH = HOST_USER_PROFILE.slice(env.HOMEDRIVE.length);
+  env.APPDATA = path.join(HOST_USER_PROFILE, "AppData", "Roaming");
+  env.LOCALAPPDATA = path.join(HOST_USER_PROFILE, "AppData", "Local");
+  const agyBin = path.join(HOST_USER_PROFILE, "AppData", "Local", "agy", "bin");
+  if (fs.existsSync(agyBin)) {
+    const p = env.PATH || env.Path || "";
+    if (!p.toLowerCase().includes(agyBin.toLowerCase())) {
+      env.PATH = `${agyBin};${p}`;
+      env.Path = `${agyBin};${p}`;
+    }
+  }
+  return env;
+}
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
@@ -101,7 +134,7 @@ function makeWorkerName(baseName) {
 
 function fetchRawModels() {
   return new Promise((resolve) => {
-    execFile(AGY_EXE, ["models"], { windowsHide: true }, (err, stdout) => {
+    execFile(AGY_EXE, ["models"], { env: getAgyEnv(), windowsHide: true }, (err, stdout) => {
       if (err || !stdout) {
         logEvent(`failed to query agy models: ${err?.message || "empty output"}`);
         return resolve([]);
@@ -341,6 +374,7 @@ function spawnAgyProcess(session) {
 
   const child = spawn(AGY_EXE, args, {
     cwd: session.workspace,
+    env: getAgyEnv(),
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
   });

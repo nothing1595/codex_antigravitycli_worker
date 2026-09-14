@@ -79,10 +79,20 @@ function brokerRequest(method, params) {
 }
 
 function spawnBroker() {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const hostProfile = process.env.AGY_USER_PROFILE || (fs.existsSync("C:\\Users\\15869") ? "C:\\Users\\15869" : os.homedir());
   const child = spawn(process.execPath, [BROKER_PATH], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
+    env: {
+      ...process.env,
+      USERPROFILE: hostProfile,
+      HOME: hostProfile,
+      APPDATA: path.join(hostProfile, "AppData", "Roaming"),
+      LOCALAPPDATA: path.join(hostProfile, "AppData", "Local"),
+    },
   });
   child.unref();
 }
