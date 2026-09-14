@@ -112,7 +112,7 @@ When assigned in Codex:
 
 ---
 
-## Installation
+## Installation & Startup
 
 Run the PowerShell installer:
 
@@ -124,6 +124,13 @@ The installer will:
 1. Dynamically query `agy models` to verify local Antigravity models.
 2. Clean up any obsolete agent files (such as `agy-pro-worker.toml`).
 3. Render and install the unified `agy-worker.toml` into your Codex `agents/` directory.
+4. Register the `AntigravityBroker` user-level Windows Scheduled Task with permissions for sandbox users.
+5. Launch the host broker daemon in the authenticated interactive user session via `scripts\start-broker.ps1`.
+
+To manually start or verify the broker daemon at any time:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-broker.ps1
+```
 
 Restart Codex, then ask it to assign **`agy_worker`**.
 

@@ -119,9 +119,16 @@ if ($IsWindows -or $env:OS -match 'Windows') {
         $brokerScript = Join-Path $bridgeRoot 'server\antigravity-broker.cjs'
         $taskCmd = "`"$nodeExe`" `"$brokerScript`""
         schtasks /Create /TN "AntigravityBroker" /TR $taskCmd /SC ONCE /ST 23:59 /F 2>&1 | Out-Null
-        Write-Host "Registered user Scheduled Task 'AntigravityBroker' (host security context)." -ForegroundColor Green
+        icacls "C:\Windows\System32\Tasks\AntigravityBroker" /grant "Users:(RX)" "CodexSandboxOffline:(RX)" "CodexSandboxOnline:(RX)" 2>&1 | Out-Null
+        Write-Host "Registered user Scheduled Task 'AntigravityBroker' with sandbox execution permissions." -ForegroundColor Green
     } catch {
         Write-Warning "Could not register AntigravityBroker scheduled task: $($_.Exception.Message)"
+    }
+
+    # Start or restart the broker daemon immediately in host session
+    $startScript = Join-Path $bridgeRoot 'scripts\start-broker.ps1'
+    if (Test-Path -LiteralPath $startScript) {
+        & $startScript -Restart
     }
 }
 

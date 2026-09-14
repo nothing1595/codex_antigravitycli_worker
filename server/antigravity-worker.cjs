@@ -95,9 +95,16 @@ function spawnBroker() {
     }
   }
 
-  // 2. Direct spawn fallback
-  const fs = require("node:fs");
+  // 2. Direct spawn fallback (only safe if running in host user session)
   const os = require("node:os");
+  const current = (os.userInfo().username || "").toLowerCase();
+  if (current.includes("sandbox")) {
+    // In sandbox: spawning directly will create an unauthenticated sandbox broker.
+    // Rely exclusively on Scheduled Task or external host broker daemon.
+    return;
+  }
+
+  const fs = require("node:fs");
   const hostProfile = process.env.AGY_USER_PROFILE || (fs.existsSync("C:\\Users\\15869") ? "C:\\Users\\15869" : os.homedir());
   const child = spawn(process.execPath, [BROKER_PATH], {
     detached: true,
@@ -133,7 +140,7 @@ async function callBroker(method, params) {
       await sleep(BROKER_START_RETRY_MS);
     }
   }
-  throw new Error(`antigravity-broker unreachable on 127.0.0.1:${BROKER_PORT}: ${lastError?.message || "unknown error"}`);
+  throw new Error(`antigravity-broker unreachable on 127.0.0.1:${BROKER_PORT}. Please ensure the host broker daemon is running in your interactive desktop session (run scripts\\start-broker.ps1 or 'schtasks /Run /TN AntigravityBroker'). Details: ${lastError?.message || "unknown error"}`);
 }
 
 const tools = [

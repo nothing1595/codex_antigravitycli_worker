@@ -16,7 +16,7 @@ const { randomUUID } = require("node:crypto");
 const SERVER = { name: "antigravity-broker", version: "0.3.0" };
 const BROKER_PORT = Number(process.env.AGY_BROKER_PORT || 19225);
 const MAX_PARALLEL_JOBS = Number(process.env.AGY_MAX_PARALLEL_JOBS || 2);
-const IDLE_EXIT_MS = Number(process.env.AGY_BROKER_IDLE_MS || 10 * 60_000);
+const IDLE_EXIT_MS = Number(process.env.AGY_BROKER_IDLE_MS || 0); // 0 = persistent daemon (no auto-exit)
 const JOB_TTL_MS = 60 * 60_000;
 const TASK_IDLE_TIMEOUT_MS = Number(process.env.AGY_TASK_IDLE_TIMEOUT_MS || 10 * 60_000);
 const TASK_HARD_TIMEOUT_MS = Number(process.env.AGY_TASK_TIMEOUT_MS || 4 * 60 * 60_000);
@@ -34,6 +34,18 @@ function resolveHostUserProfile() {
 }
 
 const HOST_USER_PROFILE = resolveHostUserProfile();
+
+// Enforce that broker only runs under the interactive authenticated host user
+function assertHostUserSecurity() {
+  const current = (os.userInfo().username || "").toLowerCase();
+  const host = path.basename(HOST_USER_PROFILE).toLowerCase();
+  if (current.includes("sandbox") || (current !== host && current !== "system")) {
+    const msg = `FATAL: antigravity-broker cannot run under sandbox user '${current}'. It must run under host user '${host}' to access Antigravity credentials and desktop display.`;
+    process.stderr.write(`${new Date().toISOString()} ${msg}\n`);
+    process.exit(42);
+  }
+}
+assertHostUserSecurity();
 
 function resolveAgyExe() {
   if (process.env.AGY_EXE && fs.existsSync(process.env.AGY_EXE)) {
@@ -65,6 +77,22 @@ function getAgyEnv() {
       env.Path = `${agyBin};${p}`;
     }
   }
+
+  // Network proxy preservation & auto-detection for Google API connectivity
+  const defaultProxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "http://127.0.0.1:10808";
+  if (!env.HTTPS_PROXY && defaultProxy) {
+    env.HTTPS_PROXY = defaultProxy;
+    env.https_proxy = defaultProxy;
+  }
+  if (!env.HTTP_PROXY && defaultProxy) {
+    env.HTTP_PROXY = defaultProxy;
+    env.http_proxy = defaultProxy;
+  }
+  if (!env.NO_PROXY) {
+    env.NO_PROXY = "localhost,127.0.0.1,::1";
+    env.no_proxy = "localhost,127.0.0.1,::1";
+  }
+
   return env;
 }
 
@@ -223,7 +251,7 @@ function fetchRawModels() {
     execFile(AGY_EXE, ["models"], {
       env: getAgyEnv(),
       windowsHide: true,
-      timeout: 6000,
+      timeout: 15000,
       stdio: ["ignore", "pipe", "pipe"],
     }, (err, stdout) => {
       fetchModelsInFlight = null;
@@ -284,6 +312,13 @@ async function getAvailableModelFamilies() {
   cachedModelsTime = now;
   return cachedModels;
 }
+
+// Warm up dynamic models in background on startup so list_models gets full 14 models instantly
+setTimeout(() => {
+  getAvailableModelFamilies().then((families) => {
+    logEvent(`warmup: discovered ${families.length} dynamic model families`);
+  }).catch(() => {});
+}, 1000).unref();
 
 async function resolveModelSelection(requestedModel) {
   if (!requestedModel || typeof requestedModel !== "string") {
@@ -488,6 +523,32 @@ async function createSession({ workspace, model: rawModel, effort: rawEffort, ag
   return session;
 }
 
+let lastSpawnSlotPromise = Promise.resolve();
+
+async function acquireSpawnSlot() {
+  const previous = lastSpawnSlotPromise;
+  let release;
+  let resolved = false;
+  lastSpawnSlotPromise = new Promise((r) => { release = r; });
+
+  await previous;
+
+  const timer = setTimeout(() => {
+    if (!resolved) {
+      resolved = true;
+      release();
+    }
+  }, 4000);
+
+  return () => {
+    if (!resolved) {
+      resolved = true;
+      clearTimeout(timer);
+      release();
+    }
+  };
+}
+
 function spawnAgyProcess(session) {
   const args = [
     "--input-format", "stream-json",
@@ -526,6 +587,10 @@ function spawnAgyProcess(session) {
 
   session.process = child;
   session.processExited = false;
+  session.initPromise = new Promise((resolve, reject) => {
+    session._initResolve = resolve;
+    session._initReject = reject;
+  });
   let stdoutBuffer = "";
 
   child.stdout.setEncoding("utf8");
@@ -554,8 +619,18 @@ function spawnAgyProcess(session) {
   child.on("error", (error) => {
     logEvent(`session ${session.sessionId} agy process error: ${error.message}`);
     session.processExited = true;
+    const isPreInit = typeof session._initReject === "function";
+    if (isPreInit) {
+      session._initReject(error);
+      session._initResolve = null;
+      session._initReject = null;
+    }
     const activeJob = session.activeJobId ? jobs.get(session.activeJobId) : null;
     if (activeJob && !TERMINAL_STATUSES.has(activeJob.status)) {
+      if (isPreInit) {
+        logEvent(`pre-init error for job ${activeJob.jobId}, delegating recovery to executeJob`);
+        return;
+      }
       activeJob.status = "failed";
       activeJob.stderr = safeTail(`${activeJob.stderr}\n${error.stack || error.message}`);
       settleJob(activeJob);
@@ -566,8 +641,18 @@ function spawnAgyProcess(session) {
     logEvent(`session ${session.sessionId} agy process closed (code=${code}, signal=${signal})`);
     session.processExited = true;
     session.process = null;
+    const isPreInit = typeof session._initReject === "function";
+    if (isPreInit) {
+      session._initReject(new Error(`agy CLI closed with code ${code} before emitting 'init'`));
+      session._initResolve = null;
+      session._initReject = null;
+    }
     const activeJob = session.activeJobId ? jobs.get(session.activeJobId) : null;
     if (activeJob && !TERMINAL_STATUSES.has(activeJob.status)) {
+      if (isPreInit) {
+        logEvent(`pre-init exit for job ${activeJob.jobId}, delegating recovery to executeJob`);
+        return;
+      }
       if (activeJob.status === "cancelling") {
         activeJob.status = "cancelled";
       } else {
@@ -606,6 +691,11 @@ function handleAgyEventLine(session, rawLine) {
       if (message.conversation_id) {
         session.conversationId = message.conversation_id;
         activeJob.conversationId = message.conversation_id;
+      }
+      if (typeof session._initResolve === "function") {
+        session._initResolve(message);
+        session._initResolve = null;
+        session._initReject = null;
       }
       logEvent(`session ${session.sessionId} initialized conversation ${session.conversationId}`);
       writeSessionEvent(session, { type: "init", conversation_id: session.conversationId });
@@ -792,11 +882,44 @@ async function executeJob(job, session) {
   launchSessionViewer(session);
 
   try {
-    if (!session.process || session.processExited) {
-      spawnAgyProcess(session);
-    }
+    const MAX_START_ATTEMPTS = 3;
+    let started = false;
+    for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt++) {
+      if (job.status === "cancelling" || job.status === "cancelled") {
+        return;
+      }
+      let releaseSpawn = null;
+      try {
+        if (!session.process || session.processExited) {
+          releaseSpawn = await acquireSpawnSlot();
+          spawnAgyProcess(session);
+        }
 
-    await sleep(200);
+        if (session.initPromise) {
+          logEvent(`job ${job.jobId} waiting for agy process initialization ('init' event, attempt ${attempt}/${MAX_START_ATTEMPTS})...`);
+          const initTimeout = sleep(25000).then(() => {
+            throw new Error("Timed out (25s) waiting for Antigravity CLI process to initialize (emit 'init' event)");
+          });
+          await Promise.race([session.initPromise, initTimeout]);
+          session.initPromise = null;
+        }
+        started = true;
+        break;
+      } catch (startErr) {
+        logEvent(`job ${job.jobId} process startup attempt ${attempt} failed: ${startErr.message}`);
+        await terminateSessionProcess(session, `startup retry cleanup`);
+        if (attempt < MAX_START_ATTEMPTS) {
+          await sleep(1200 * attempt);
+        } else {
+          throw startErr;
+        }
+      } finally {
+        if (releaseSpawn) {
+          releaseSpawn();
+          releaseSpawn = null;
+        }
+      }
+    }
 
     const userPromptContent = session.permissionMode === "yolo" ? wrapAutonomousPrompt(job.prompt) : job.prompt;
 
@@ -902,6 +1025,9 @@ async function dispatch(method, params) {
         parallel_limit: MAX_PARALLEL_JOBS,
         sessions_count: sessions.size,
         port: BROKER_PORT,
+        user: os.userInfo().username,
+        pid: process.pid,
+        models_count: cachedModels ? cachedModels.length : 0,
       };
 
     case "list_models":
@@ -1037,7 +1163,7 @@ async function shutdownBroker(reason = "idle timeout") {
   process.exit(0);
 }
 
-  if (clients.size === 0 && !hasActiveJobs() && now - lastActivity > IDLE_EXIT_MS) {
+  if (IDLE_EXIT_MS > 0 && clients.size === 0 && !hasActiveJobs() && now - lastActivity > IDLE_EXIT_MS) {
     logEvent("antigravity-broker idle timeout reached, triggering graceful shutdown");
     void shutdownBroker("idle timeout");
   }
