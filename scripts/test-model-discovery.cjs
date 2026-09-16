@@ -310,6 +310,14 @@ async function runTests() {
     assert.strictEqual(defaultTimeoutArgs[defaultPrintTimeoutIndex + 1], "240m", "CLI print timeout must default to 240m");
     console.log("✓ CLI print timeout defaults to 240 minutes instead of agy's 5-minute default");
 
+    const agentIdlePolicy = broker.getTaskIdleTimeoutPolicy({ progress: { step_type: "agent_response", state: "ACTIVE" } });
+    assert.strictEqual(agentIdlePolicy.reason, "agent_idle_timeout");
+    assert.strictEqual(agentIdlePolicy.timeoutMs, 10 * 60_000);
+    const toolIdlePolicy = broker.getTaskIdleTimeoutPolicy({ progress: { step_type: "tool", state: "DONE" } });
+    assert.strictEqual(toolIdlePolicy.reason, "tool_silence_timeout");
+    assert.strictEqual(toolIdlePolicy.timeoutMs, 60 * 60_000);
+    console.log("✓ Tool execution silence gets a 60-minute grace window; agent silence remains 10 minutes");
+
     // -------------------------------------------------------------------------
     // Test 9: Model-specific --effort compatibility
     // -------------------------------------------------------------------------

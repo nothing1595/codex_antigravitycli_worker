@@ -157,6 +157,7 @@ Restart Codex, then ask it to assign **`agy_worker`**.
 | `AGY_TASK_TIMEOUT_MS` | `14400000` (4h) | Hard deadline timeout for a single task. |
 | `AGY_DEFAULT_TIMEOUT_MINUTES` | `240` (4h) | Default per-task timeout when `timeout_minutes` is omitted or invalid. |
 | `AGY_TASK_IDLE_TIMEOUT_MS` | `600000` (10m) | Stall detection: silence timeout before failing job. |
+| `AGY_TASK_TOOL_IDLE_TIMEOUT_MS` | `3600000` (60m) | Silence timeout while the latest stream step is a tool execution; protects long local commands while retaining the hard task deadline. |
 | `AGY_SHOW_WINDOW` | `1` | Set to `1` to pop up desktop CLI monitor window, `0` for headless. |
 | `AGY_MODELS_CACHE_FILE` | `%USERPROFILE%\.antigravity-codex-bridge\models-cache.json` | Persistent model cache file path. |
 | `AGY_MODELS_CACHE_TTL_MS` | `300000` (5m) | In-memory models cache TTL in milliseconds. |

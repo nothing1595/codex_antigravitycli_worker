@@ -19,6 +19,7 @@ const MAX_PARALLEL_JOBS = Number(process.env.AGY_MAX_PARALLEL_JOBS || 2);
 const IDLE_EXIT_MS = Number(process.env.AGY_BROKER_IDLE_MS || 0); // 0 = persistent daemon (no auto-exit)
 const JOB_TTL_MS = 60 * 60_000;
 const TASK_IDLE_TIMEOUT_MS = Number(process.env.AGY_TASK_IDLE_TIMEOUT_MS || 10 * 60_000);
+const TASK_TOOL_IDLE_TIMEOUT_MS = Number(process.env.AGY_TASK_TOOL_IDLE_TIMEOUT_MS || 60 * 60_000);
 const TASK_HARD_TIMEOUT_MS = Number(process.env.AGY_TASK_TIMEOUT_MS || 4 * 60 * 60_000);
 const configuredDefaultTimeoutMinutes = Number(process.env.AGY_DEFAULT_TIMEOUT_MINUTES || 240);
 const DEFAULT_TIMEOUT_MINUTES = Number.isFinite(configuredDefaultTimeoutMinutes) && configuredDefaultTimeoutMinutes > 0
@@ -86,6 +87,14 @@ function getCliPrintTimeoutMinutes(session) {
     return Math.max(1, Math.ceil(timeoutMinutes));
   }
   return Math.max(1, Math.ceil(DEFAULT_TIMEOUT_MINUTES));
+}
+
+function getTaskIdleTimeoutPolicy(job) {
+  const isToolStep = job?.progress?.step_type === "tool";
+  return {
+    timeoutMs: isToolStep ? TASK_TOOL_IDLE_TIMEOUT_MS : TASK_IDLE_TIMEOUT_MS,
+    reason: isToolStep ? "tool_silence_timeout" : "agent_idle_timeout",
+  };
 }
 
 function getAgyEnv() {
@@ -1257,6 +1266,7 @@ function settleJob(job) {
       job_id: job.jobId,
       status: job.status,
       exit_code: job.exitCode,
+      diagnostics: redactSensitive(job.stderr.trim()),
       usage: job.usage,
       duration_s,
     });
@@ -1414,8 +1424,17 @@ async function executeJob(job, session) {
       }
 
       const silenceMs = Date.now() - job.lastActivityMs;
-      if (silenceMs > TASK_IDLE_TIMEOUT_MS) {
-        throw new Error(`agy CLI stalled: no activity for ${Math.round(silenceMs / 1000)}s`);
+      const idlePolicy = getTaskIdleTimeoutPolicy(job);
+      if (silenceMs > idlePolicy.timeoutMs) {
+        const lastProgress = job.progress
+          ? JSON.stringify({ step_index: job.progress.step_index, step_type: job.progress.step_type, state: job.progress.state })
+          : "none";
+        const error = new Error(
+          `agy CLI stalled: ${idlePolicy.reason} after ${Math.round(silenceMs / 1000)}s ` +
+          `(limit ${Math.round(idlePolicy.timeoutMs / 60_000)}m, last_progress=${lastProgress})`,
+        );
+        error.code = idlePolicy.reason;
+        throw error;
       }
     }
   } catch (error) {
@@ -1687,6 +1706,7 @@ module.exports = {
   getAgyEnv,
   modelSupportsEffortFlag,
   getCliPrintTimeoutMinutes,
+  getTaskIdleTimeoutPolicy,
   buildAgyArgs,
   getBaseFamilyName,
   getEffortScore,

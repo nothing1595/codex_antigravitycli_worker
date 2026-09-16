@@ -150,7 +150,11 @@ function renderEvent(event) {
       const bannerColor = isSuccess ? c.brightGreen : c.brightRed;
       const statusIcon = isSuccess ? "✅" : "❌";
       console.log(`${bannerColor}${c.bold}==============================================================================${c.reset}`);
-      console.log(`${bannerColor}${c.bold}  ${statusIcon} TURN FINISHED: ${event.status.toUpperCase()} (Exit Code: ${event.exit_code ?? 0})${c.reset}`);
+      const exitCode = event.exit_code == null ? "unknown" : event.exit_code;
+      console.log(`${bannerColor}${c.bold}  ${statusIcon} TURN FINISHED: ${event.status.toUpperCase()} (Exit Code: ${exitCode})${c.reset}`);
+      if (event.diagnostics) {
+        console.log(`${c.dim}  • Reason   : ${event.diagnostics}${c.reset}`);
+      }
       if (event.duration_s) {
         console.log(`${c.dim}  • Duration : ${event.duration_s}s${c.reset}`);
       }
