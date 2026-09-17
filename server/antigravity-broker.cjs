@@ -13,7 +13,7 @@ const path = require("node:path");
 const { spawn, execFile } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 
-const SERVER = { name: "antigravity-broker", version: "0.3.0" };
+const SERVER = { name: "antigravity-broker", version: "0.4.0" };
 const BROKER_PORT = Number(process.env.AGY_BROKER_PORT || 19225);
 const MAX_PARALLEL_JOBS = Number(process.env.AGY_MAX_PARALLEL_JOBS || 2);
 const IDLE_EXIT_MS = Number(process.env.AGY_BROKER_IDLE_MS || 0); // 0 = persistent daemon (no auto-exit)
@@ -30,6 +30,7 @@ const MODELS_CACHE_TTL_MS = Number(process.env.AGY_MODELS_CACHE_TTL_MS || 5 * 60
 const MODELS_QUERY_TIMEOUT_MS = Number(process.env.AGY_MODELS_TIMEOUT_MS || 12_000);
 const MODELS_QUERY_RETRIES = Number(process.env.AGY_MODELS_RETRIES || 2);
 const MODELS_QUERY_BACKOFF_MS = Number(process.env.AGY_MODELS_BACKOFF_MS || 800);
+const DONE_GRACE_PERIOD_MS = Number(process.env.AGY_DONE_GRACE_MS || 60_000);
 
 function resolveHostUserProfile() {
   if (process.env.AGY_USER_PROFILE && fs.existsSync(process.env.AGY_USER_PROFILE)) {
@@ -90,7 +91,16 @@ function getCliPrintTimeoutMinutes(session) {
 }
 
 function getTaskIdleTimeoutPolicy(job) {
-  const isToolStep = job?.progress?.step_type === "tool";
+  const stepType = job?.progress?.step_type;
+  const stepState = job?.progress?.state;
+  const isToolStep = stepType === "tool";
+  const isDoneWaiting = String(stepState).toUpperCase() === "DONE";
+  if (isDoneWaiting) {
+    return {
+      timeoutMs: DONE_GRACE_PERIOD_MS,
+      reason: "done_grace_timeout",
+    };
+  }
   return {
     timeoutMs: isToolStep ? TASK_TOOL_IDLE_TIMEOUT_MS : TASK_IDLE_TIMEOUT_MS,
     reason: isToolStep ? "tool_silence_timeout" : "agent_idle_timeout",
@@ -1201,11 +1211,23 @@ function handleAgyEventLine(session, rawLine) {
       }
 
       if (update.tool_call) {
-        writeSessionEvent(session, { type: "tool_call", name: update.tool_call.name, input: update.tool_call.input });
+        writeSessionEvent(session, {
+          type: "tool_call",
+          name: update.tool_call.name,
+          input: update.tool_call.input,
+          id: update.tool_call.id || null,
+          step_index: update.step_index ?? null,
+        });
       }
 
       if (update.tool_result) {
-        writeSessionEvent(session, { type: "tool_result", name: update.tool_result.name, output: update.tool_result.output });
+        writeSessionEvent(session, {
+          type: "tool_result",
+          name: update.tool_result.name,
+          output: update.tool_result.output,
+          id: update.tool_result.id || null,
+          step_index: update.step_index ?? null,
+        });
       }
 
       if (update.usage) {
@@ -1219,7 +1241,11 @@ function handleAgyEventLine(session, rawLine) {
         state: update.state ?? null,
         total_tokens: update.usage?.total_tokens ?? activeJob.usage?.total_tokens ?? null,
       };
-      writeSessionEvent(session, { type: "step_progress", progress: activeJob.progress });
+      writeSessionEvent(session, {
+        type: "step_progress",
+        progress: activeJob.progress,
+        timestamp: Date.now(),
+      });
       break;
     }
 
@@ -1429,6 +1455,17 @@ async function executeJob(job, session) {
         const lastProgress = job.progress
           ? JSON.stringify({ step_index: job.progress.step_index, step_type: job.progress.step_type, state: job.progress.state })
           : "none";
+
+        if (idlePolicy.reason === "done_grace_timeout" && job.stdout.trim()) {
+          logEvent(`job ${job.jobId} done_grace_timeout reached after ${Math.round(silenceMs / 1000)}s; synthesizing result from collected output`);
+          job.status = "completed";
+          job.response = job.stdout.trim();
+          job.exitCode = 0;
+          job.diagnostics = `Synthesized completion: agy reported state=DONE at step ${job.progress?.step_index ?? "?"} but no stream-json result event was received within ${Math.round(DONE_GRACE_PERIOD_MS / 1000)}s grace period. Output captured from streaming deltas.`;
+          settleJob(job);
+          break;
+        }
+
         const error = new Error(
           `agy CLI stalled: ${idlePolicy.reason} after ${Math.round(silenceMs / 1000)}s ` +
           `(limit ${Math.round(idlePolicy.timeoutMs / 60_000)}m, last_progress=${lastProgress})`,

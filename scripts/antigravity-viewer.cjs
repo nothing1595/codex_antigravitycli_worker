@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 "use strict";
 
-// Real-time CLI Monitor Window for Antigravity-Codex Bridge
-// Displays live streaming reasoning, tool calls, status, and assistant responses.
-
 const fs = require("node:fs");
 const readline = require("node:readline");
 
@@ -15,7 +12,6 @@ if (!logPath) {
   process.exit(1);
 }
 
-// ANSI Escape Codes
 const c = {
   reset: "\x1b[0m",
   bold: "\x1b[1m",
@@ -37,7 +33,6 @@ const c = {
   gray: "\x1b[90m",
 };
 
-// Set console window title
 process.stdout.write(`\x1b]0;⚡ Antigravity CLI Monitor - ${sessionId}\x07`);
 
 console.clear();
@@ -45,13 +40,34 @@ console.log(`${c.bold}${c.brightCyan}╔═════════════�
 console.log(`${c.bold}${c.brightCyan}║               ⚡ ANTIGRAVITY CLI REAL-TIME MONITOR (CODEX)                  ║${c.reset}`);
 console.log(`${c.bold}${c.brightCyan}╚══════════════════════════════════════════════════════════════════════════════╝${c.reset}\n`);
 
-let currentMode = null; // 'thought', 'text', 'tool'
+let currentMode = null;
 let filePosition = 0;
 let isFinished = false;
+let turnStartMs = null;
+let lastStepIndex = null;
+let lastToolCallMs = null;
+let elapsedTimer = null;
 
 function formatTimestamp(ts) {
   const d = ts ? new Date(ts) : new Date();
   return d.toTimeString().split(" ")[0];
+}
+
+function formatElapsed(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+function startElapsedTimer() {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(() => {
+    if (!turnStartMs || isFinished) return;
+    const elapsed = formatElapsed(Date.now() - turnStartMs);
+    process.stdout.write(`\x1b]0;⚡ Antigravity CLI Monitor - ${sessionId} [${elapsed}]\x07`);
+  }, 1000);
+  elapsedTimer.unref();
 }
 
 function renderEvent(event) {
@@ -65,7 +81,16 @@ function renderEvent(event) {
       break;
     }
 
+    case "init": {
+      console.log(`${c.bold}${c.blue}• Conv. ID   :${c.reset} ${event.conversation_id || "pending"}`);
+      break;
+    }
+
     case "turn_start": {
+      turnStartMs = Date.now();
+      lastStepIndex = null;
+      lastToolCallMs = null;
+      startElapsedTimer();
       console.log(`\n${c.bold}${c.brightMagenta}▶ [${formatTimestamp()}] STARTING TURN: ${event.job_id}${c.reset}`);
       console.log(`${c.bold}${c.white}TASK PROMPT:${c.reset}`);
       const promptLines = (event.prompt || "").trim().split("\n");
@@ -97,15 +122,17 @@ function renderEvent(event) {
 
     case "tool_call": {
       currentMode = "tool";
-      console.log(`\n${c.bold}${c.brightYellow}⚙️  [TOOL CALL]${c.reset} ${c.bold}${event.name}${c.reset}`);
+      lastToolCallMs = Date.now();
+      const stepTag = event.step_index != null ? `${c.dim} (step ${event.step_index})${c.reset}` : "";
+      console.log(`\n${c.bold}${c.brightYellow}⚙️  [TOOL CALL]${c.reset} ${c.bold}${event.name}${c.reset}${stepTag}`);
       if (event.input) {
         const inputStr = typeof event.input === "string" ? event.input : JSON.stringify(event.input, null, 2);
         const lines = inputStr.split("\n");
-        for (const l of lines.slice(0, 8)) {
+        for (const l of lines.slice(0, 12)) {
           console.log(`   ${c.yellow}${l}${c.reset}`);
         }
-        if (lines.length > 8) {
-          console.log(`   ${c.dim}... (${lines.length - 8} more lines)${c.reset}`);
+        if (lines.length > 12) {
+          console.log(`   ${c.dim}... (${lines.length - 12} more lines)${c.reset}`);
         }
       }
       break;
@@ -113,14 +140,20 @@ function renderEvent(event) {
 
     case "tool_result": {
       currentMode = "tool";
-      console.log(`${c.bold}${c.yellow}📥 [TOOL RESULT]${c.reset} ${c.dim}${event.name}${c.reset}`);
+      let durationTag = "";
+      if (lastToolCallMs) {
+        const elapsed = Date.now() - lastToolCallMs;
+        durationTag = ` ${c.dim}(${formatElapsed(elapsed)})${c.reset}`;
+        lastToolCallMs = null;
+      }
+      console.log(`${c.bold}${c.yellow}📥 [TOOL RESULT]${c.reset} ${c.dim}${event.name}${c.reset}${durationTag}`);
       if (event.output) {
         const outputLines = String(event.output).trim().split("\n");
-        for (const l of outputLines.slice(0, 4)) {
+        for (const l of outputLines.slice(0, 16)) {
           console.log(`   ${c.gray}${l}${c.reset}`);
         }
-        if (outputLines.length > 4) {
-          console.log(`   ${c.dim}... (${outputLines.length - 4} more lines)${c.reset}`);
+        if (outputLines.length > 16) {
+          console.log(`   ${c.dim}... (${outputLines.length - 16} more lines)${c.reset}`);
         }
       }
       break;
@@ -133,19 +166,31 @@ function renderEvent(event) {
 
     case "step_progress": {
       const p = event.progress || {};
-      const stepStr = p.step_index != null ? `Step: ${p.step_index}` : "";
-      const stateStr = p.state ? `State: ${p.state}` : "";
-      const tokensStr = p.total_tokens ? `Tokens: ${p.total_tokens}` : "";
-      const parts = [stepStr, stateStr, tokensStr].filter(Boolean).join(" | ");
-      if (parts) {
-        process.stdout.write(`\r${c.gray}[${formatTimestamp()}] ⏳ ${parts}${c.reset}   `);
+      const stepChanged = p.step_index != null && p.step_index !== lastStepIndex;
+
+      if (stepChanged) {
+        if (currentMode === "thought") {
+          process.stdout.write(`${c.reset}\n`);
+          currentMode = null;
+        }
+        lastStepIndex = p.step_index;
+        const elapsed = turnStartMs ? ` ${c.dim}+${formatElapsed(Date.now() - turnStartMs)}${c.reset}` : "";
+        const stepType = p.step_type ? `${c.cyan}${p.step_type}${c.reset}` : "";
+        const stateStr = p.state ? `${c.dim}${p.state}${c.reset}` : "";
+        const tokensStr = p.total_tokens ? `${c.dim}${p.total_tokens} tok${c.reset}` : "";
+        const parts = [stepType, stateStr, tokensStr].filter(Boolean).join(` ${c.gray}|${c.reset} `);
+        console.log(`${c.gray}[${formatTimestamp()}]${c.reset} ${c.bold}Step ${p.step_index}${c.reset}${elapsed} ${parts}`);
       }
       break;
     }
 
     case "turn_complete": {
       currentMode = null;
-      console.log(`\n\n${c.gray}──────────────────────────────────────────────────────────────────────────────${c.reset}`);
+      if (elapsedTimer) {
+        clearInterval(elapsedTimer);
+        elapsedTimer = null;
+      }
+      console.log(`\n${c.gray}──────────────────────────────────────────────────────────────────────────────${c.reset}`);
       const isSuccess = event.status === "completed";
       const bannerColor = isSuccess ? c.brightGreen : c.brightRed;
       const statusIcon = isSuccess ? "✅" : "❌";
@@ -156,10 +201,23 @@ function renderEvent(event) {
         console.log(`${c.dim}  • Reason   : ${event.diagnostics}${c.reset}`);
       }
       if (event.duration_s) {
-        console.log(`${c.dim}  • Duration : ${event.duration_s}s${c.reset}`);
+        const m = Math.floor(event.duration_s / 60);
+        const s = event.duration_s % 60;
+        const durationFmt = m > 0 ? `${m}m${String(s).padStart(2, "0")}s (${event.duration_s}s)` : `${s}s`;
+        console.log(`${c.dim}  • Duration : ${durationFmt}${c.reset}`);
       }
       if (event.usage) {
-        console.log(`${c.dim}  • Usage    : ${JSON.stringify(event.usage)}${c.reset}`);
+        const u = event.usage;
+        const parts = [];
+        if (u.input_tokens) parts.push(`in:${u.input_tokens}`);
+        if (u.output_tokens) parts.push(`out:${u.output_tokens}`);
+        if (u.thinking_tokens) parts.push(`think:${u.thinking_tokens}`);
+        if (u.cache_read_tokens) parts.push(`cache:${u.cache_read_tokens}`);
+        if (u.total_tokens) parts.push(`total:${u.total_tokens}`);
+        console.log(`${c.dim}  • Tokens   : ${parts.join(" | ")}${c.reset}`);
+      }
+      if (lastStepIndex != null) {
+        console.log(`${c.dim}  • Steps    : ${lastStepIndex + 1} steps executed${c.reset}`);
       }
       console.log(`${bannerColor}${c.bold}==============================================================================${c.reset}\n`);
 
@@ -180,7 +238,6 @@ function promptExit() {
   console.log(`${c.dim}Press Enter or close this window to exit.${c.reset}`);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   rl.on("line", () => process.exit(0));
-  // Auto-close after 30 minutes if left untouched
   setTimeout(() => process.exit(0), 30 * 60_000).unref();
 }
 
@@ -210,7 +267,6 @@ function pollLog() {
         const event = JSON.parse(line);
         renderEvent(event);
       } catch {
-        // raw unformatted line
         console.log(line);
       }
     }
@@ -219,7 +275,6 @@ function pollLog() {
   }
 }
 
-// Poll frequently for low-latency live streaming
 const pollTimer = setInterval(pollLog, 80);
 
 process.on("SIGINT", () => process.exit(0));

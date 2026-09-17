@@ -11,7 +11,7 @@ const net = require("node:net");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-const SERVER = { name: "codex-antigravity-worker", version: "0.3.0" };
+const SERVER = { name: "codex-antigravity-worker", version: "0.4.0" };
 const BROKER_PATH = path.join(__dirname, "antigravity-broker.cjs");
 const BROKER_PORT = Number(process.env.AGY_BROKER_PORT || 19225);
 const BROKER_START_ATTEMPTS = 40;
